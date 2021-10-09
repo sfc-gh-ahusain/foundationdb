@@ -2252,7 +2252,7 @@ ACTOR Future<Void> rejoinClusterController(TLogData* self,
 				TraceEvent("TLogRejoining", tli.id())
 				    .detail("ClusterController", self->dbInfo->get().clusterInterface.id())
 					.detail("MasterLifeTimeToken", self->dbInfo->get().masterLifetime.toString())
-					.detail("ExistingLifeTimeToken", lastMasterLifetime.toString());				
+					.detail("ExistingLifeTimeToken", lastMasterLifetime.toString());
 				choose {
 					when(TLogRejoinReply rep = wait(
 					         brokenPromiseToNever(self->dbInfo->get().clusterInterface.tlogRejoin.getReply(req)))) {

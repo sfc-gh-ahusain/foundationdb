@@ -1032,11 +1032,6 @@ public:
 				tLocalities.push_back(object->interf.locality);
 			}
 
-			TraceEvent("GetWorkersForTlogsBackup no more servers")
-			    .detail("Size", logServerSet->size())
-			    .detail("Required", required)
-			    .detail("Validate", logServerSet->validate(policy));
-
 			logServerSet->clear();
 			logServerSet.clear();
 			throw no_more_servers();
@@ -5104,9 +5099,9 @@ ACTOR Future<Void> clusterRecoveryCore(Reference<ClusterRecoveryData> self) {
 	self->addActor.send(trackTlogRecovery(self, oldLogSystems, minRecoveryDuration));
 	debug_advanceMaxCommittedVersion(UID(), self->recoveryTransactionVersion);
 	wait(self->cstateUpdated.getFuture());
-	TraceEvent("AdvanceTxnVersion", self->dbgid)
-	    .detail("Min", self->recoveryTransactionVersion)
-	    .detail("Max", self->recoveryTransactionVersion);
+	// TraceEvent("AdvanceTxnVersion", self->dbgid)
+	//     .detail("Min", self->recoveryTransactionVersion)
+	//     .detail("Max", self->recoveryTransactionVersion);
 	debug_advanceMinCommittedVersion(UID(), self->recoveryTransactionVersion);
 
 	if (debugResult) {
@@ -5152,8 +5147,6 @@ ACTOR Future<Void> clusterRecoveryCore(Reference<ClusterRecoveryData> self) {
 	} else {
 		self->logSystem->setOldestBackupEpoch(self->cstate.myDBState.recoveryCount);
 	}
-
-	TraceEvent("ClusterRecovery end", self->dbgid).log();
 
 	wait(Future<Void>(Never()));
 	throw internal_error();
@@ -5261,26 +5254,10 @@ ACTOR Future<Void> clusterWatchDatabase(ClusterControllerData* cluster,
 			state double recoveryStart = now();
 			state MasterInterface newMaster;
 
-			if (1) { //!SERVER_KNOBS->CLUSTERRECOVERY_CONTROLLER_DRIVEN_RECOVERY) {
-				TraceEvent("CCWDB", cluster->id).detail("Recruiting", "Master");
-				wait(ClusterControllerRecovery::recruitNewMaster(cluster, db, &newMaster));
-			} else {
-				// advertise ClusterController as Master interface to assist in cluster recovery
-				// master role recruitment is done like any other cluster process
-				newMaster.locality = db->serverInfo->get().myLocality;
-				newMaster.initEndpoints();
+			TraceEvent("CCWDB", cluster->id).detail("Recruiting", "Master");
+			wait(ClusterControllerRecovery::recruitNewMaster(cluster, db, &newMaster));
 
-				DUMPTOKEN_PROCESS(newMaster, newMaster.waitFailure);
-				DUMPTOKEN_PROCESS(newMaster, newMaster.getCommitVersion);
-				DUMPTOKEN_PROCESS(newMaster, newMaster.getLiveCommittedVersion);
-				DUMPTOKEN_PROCESS(newMaster, newMaster.reportLiveCommittedVersion);
-
-				TraceEvent("ClusterRecovery init master interface", cluster->id)
-				    .detail("Address", iMaster.address())
-				    .trackLatest("ClusterRecovery");
-			}
-			
-						iMaster = newMaster;
+			iMaster = newMaster;
 
 			db->masterRegistrationCount = 0;
 			db->recoveryStalled = false;
@@ -5299,6 +5276,7 @@ ACTOR Future<Void> clusterWatchDatabase(ClusterControllerData* cluster,
 			dbInfo.client = ClientDBInfo();
 
 			TraceEvent("CCWDB", cluster->id)
+				.detail("NewMaster", dbInfo.master.id().toString())
 			    .detail("Lifetime", dbInfo.masterLifetime.toString())
 			    .detail("ChangeID", dbInfo.id);
 			db->serverInfo->set(dbInfo);
@@ -5325,8 +5303,10 @@ ACTOR Future<Void> clusterWatchDatabase(ClusterControllerData* cluster,
 
 			collection = actorCollection(recoveryData->addActor.getFuture());
 			recoveryCore = ClusterControllerRecovery::clusterRecoveryCore(recoveryData);
+
 			// Master failure detection is pretty sensitive, but if we are in the middle of a very long recovery we
 			// really don't want to have to start over
+
 			loop choose {
 				when(wait(recoveryCore)) {}
 				when(wait(waitFailureClient(
@@ -5370,7 +5350,9 @@ ACTOR Future<Void> clusterWatchDatabase(ClusterControllerData* cluster,
 			TraceEvent(SevWarn, "DetectedFailedRecovery", cluster->id).detail("OldMaster", iMaster.id());
 		} catch (Error& e) {
 			state Error err = e;
+
 			TraceEvent("CCWDB", cluster->id).error(e, true).detail("Master", iMaster.id());
+
 			if (e.code() != error_code_actor_cancelled) {
 				wait(delay(0.0));
 			}
@@ -5388,9 +5370,7 @@ ACTOR Future<Void> clusterWatchDatabase(ClusterControllerData* cluster,
 			TEST(err.code() == error_code_restart_cluster_controller);  // Terminated due to cluster-controller restart needed.
 
 			if (cluster->shouldCommitSuicide || err.code() == error_code_coordinators_changed) {
-				TraceEvent("TerminateClusterController", cluster->id)
-				    .error(err, true)
-				    .detail("ClusterController", recoveryData->clusterController.id());
+				TraceEvent("ClusterControllerTerminate", cluster->id).error(err, true);
 
 				throw restart_cluster_controller();
 			}
@@ -7491,7 +7471,7 @@ TEST_CASE("/fdbserver/clustercontroller/shouldTriggerRecoveryDueToDegradedServer
 
 	MasterInterface mInterface;
 	mInterface.getCommitVersion = RequestStream<struct GetCommitVersionRequest>(Endpoint({ master }, UID(1, 2)));
-	testDbInfo.master = mInterface;	
+	testDbInfo.master = mInterface;
 
 	TLogInterface localTLogInterf;
 	localTLogInterf.peekMessages = RequestStream<struct TLogPeekRequest>(Endpoint({ tlog }, UID(1, 2)));

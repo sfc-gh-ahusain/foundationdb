@@ -1459,9 +1459,6 @@ ACTOR Future<Version> watchWaitForValueChange(StorageServer* data, SpanID parent
 			TEST(true); // Reading a watched key failed with transaction_too_old
 		}
 
-		if (metadata->debugID.present()) {
-			TraceEvent("WatchValueDebug", metadata->debugID.get()).detail("Key", metadata->key.toString());
-		}
 		watchFuture = data->watches.onChange(metadata->key);
 		wait(data->version.whenAtLeast(data->data().latestVersion));
 	}

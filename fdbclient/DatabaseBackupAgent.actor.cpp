@@ -27,7 +27,6 @@
 #include <ctime>
 #include <climits>
 #include "fdbrpc/IAsyncFile.h"
-#include "flow/IRandom.h"
 #include "flow/genericactors.actor.h"
 #include "flow/Hash3.h"
 #include <numeric>
@@ -2463,8 +2462,6 @@ public:
 	                                             Database cx,
 	                                             Key tagName,
 	                                             StopWhenDone stopWhenDone) {
-		state UID dbgId = debugRandom()->randomUniqueID();
-		TraceEvent("WaitBackup", dbgId).log();
 		state std::string backTrace;
 		state UID logUid = wait(backupAgent->getLogUid(cx, tagName));
 		state Key statusKey = backupAgent->states.get(BinaryWriter::toValue(logUid, Unversioned()))
@@ -2474,7 +2471,6 @@ public:
 			state Reference<ReadYourWritesTransaction> tr(new ReadYourWritesTransaction(cx));
 			tr->setOption(FDBTransactionOptions::ACCESS_SYSTEM_KEYS);
 			tr->setOption(FDBTransactionOptions::LOCK_AWARE);
-			tr->debugTransaction(dbgId);
 
 			try {
 				state EBackupState status = wait(backupAgent->getStateValue(tr, logUid));
@@ -2489,7 +2485,6 @@ public:
 					return status;
 				}
 
-				TraceEvent("StatusKey", dbgId).detail("Key", statusKey.toString());
 				state Future<Void> watchFuture = tr->watch(statusKey);
 				wait(tr->commit());
 				wait(watchFuture);
@@ -2759,7 +2754,6 @@ public:
 				wait(versionWatch);
 				tr2.reset();
 			} catch (Error& e) {
-				TraceEvent("SwitchOverEx").error(e);
 				wait(tr2.onError(e));
 			}
 		}

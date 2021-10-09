@@ -59,8 +59,8 @@ struct MasterInterface {
 			    RequestStream<struct GetRawCommittedVersionRequest>(waitFailure.getEndpoint().getAdjustedEndpoint(2));
 			reportLiveCommittedVersion = RequestStream<struct ReportRawCommittedVersionRequest>(
 			    waitFailure.getEndpoint().getAdjustedEndpoint(3));
-			updateRecoveryData = RequestStream<struct UpdateRecoveryDataRequest>(
-			    waitFailure.getEndpoint().getAdjustedEndpoint(4));				
+			updateRecoveryData =
+			    RequestStream<struct UpdateRecoveryDataRequest>(waitFailure.getEndpoint().getAdjustedEndpoint(4));
 		}
 	}
 

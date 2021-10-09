@@ -937,7 +937,7 @@ ACTOR Future<Void> grvProxyServerCore(GrvProxyInterface proxy,
 	TraceEvent("GrvProxyServerCore", proxy.id())
 	    .detail("MasterId", master.id().toString())
 	    .detail("MasterLifetime", masterLifetime.toString())
-		.detail("RecoveryCount", db->get().recoveryCount);
+	    .detail("RecoveryCount", db->get().recoveryCount);
 
 	// Wait until we can load the "real" logsystem, since we don't support switching them currently
 	while (!(masterLifetime.isEqual(grvProxyData.db->get().masterLifetime) &&
@@ -964,7 +964,6 @@ ACTOR Future<Void> grvProxyServerCore(GrvProxyInterface proxy,
 			dbInfoChange = grvProxyData.db->onChange();
 
 			if (masterLifetime.isEqual(grvProxyData.db->get().masterLifetime) &&
-			    // grvProxyData.db->get().master.id() == master.id() &&
 			    grvProxyData.db->get().recoveryState >= RecoveryState::RECOVERY_TRANSACTION) {
 				grvProxyData.logSystem =
 				    ILogSystem::fromServerDBInfo(proxy.id(), grvProxyData.db->get(), false, addActor);
