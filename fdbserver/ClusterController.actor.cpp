@@ -4510,8 +4510,10 @@ ACTOR Future<Void> readTransactionSystemState(Reference<ClusterRecoveryData> sel
                                               Version txsPoppedVersion) {
 	state Reference<AsyncVar<PeekTxsInfo>> myLocality = Reference<AsyncVar<PeekTxsInfo>>(
 	    new AsyncVar<PeekTxsInfo>(PeekTxsInfo(tagLocalityInvalid, tagLocalityInvalid, invalidVersion)));
+	ASSERT(self->controllerData != NULL);
+	//ASSERT(self->controllerData->clusterControllerDcId.present());
 	state Future<Void> localityUpdater =
-	    updateLocalityForDcId(self->controllerData->clusterControllerDcId.get(), oldLogSystem, myLocality);
+	    updateLocalityForDcId(self->masterInterface.locality.dcId(), oldLogSystem, myLocality);
 	// Peek the txnStateTag in oldLogSystem and recover self->txnStateStore
 
 	// For now, we also obtain the recovery metadata that the log system obtained during the end_epoch process for
@@ -4957,7 +4959,7 @@ ACTOR Future<Void> clusterRecoveryCore(Reference<ClusterRecoveryData> self) {
 	    .detail("StatusCode", RecoveryStatus::recovery_transaction)
 	    .detail("Status", RecoveryStatus::names[RecoveryStatus::recovery_transaction])
 	    .detail("PrimaryLocality", self->primaryLocality)
-	    .detail("DcId", self->controllerData->clusterControllerDcId.get())
+	    .detail("DcId", self->masterInterface.locality.dcId())
 	    .trackLatest("ClusterRecoveryState");
 
 	// Recovery transaction
