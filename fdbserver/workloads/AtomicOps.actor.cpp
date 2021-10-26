@@ -433,6 +433,7 @@ struct AtomicOpsWorkload : TestWorkload {
 						break;
 					}
 				} catch (Error& e) {
+					TraceEvent("CheckError").error(e, true);
 					wait(tr.onError(e));
 				}
 			}
