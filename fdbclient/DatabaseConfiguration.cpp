@@ -20,6 +20,7 @@
 
 #include "fdbclient/DatabaseConfiguration.h"
 #include "fdbclient/SystemData.h"
+#include "flow/genericactors.actor.h"
 
 DatabaseConfiguration::DatabaseConfiguration() {
 	resetInternal();
@@ -47,6 +48,10 @@ void DatabaseConfiguration::resetInternal() {
 	perpetualStorageWiggleSpeed = 0;
 	perpetualStorageWiggleLocality = "0";
 	storageMigrationType = StorageMigrationType::DEFAULT;
+}
+
+int toInt(ValueRef const& v) {
+	return atoi(v.toString().c_str());
 }
 
 void parse(int* i, ValueRef const& v) {
@@ -466,6 +471,26 @@ std::string DatabaseConfiguration::toString() const {
 	return json_spirit::write_string(json_spirit::mValue(toJSON()), json_spirit::Output_options::none);
 }
 
+void DatabaseConfiguration::overwriteProxiesCount(int const& proxiesCount) {
+	if (proxiesCount > 1) {
+		if (grvProxyCount == -1 && commitProxyCount > 0) {
+			ASSERT(proxiesCount > commitProxyCount);
+			grvProxyCount = proxiesCount - commitProxyCount;
+		} else if (grvProxyCount > 0 && commitProxyCount == -1) {
+			ASSERT(proxiesCount > grvProxyCount);
+			commitProxyCount = proxiesCount - grvProxyCount;
+		} else if (grvProxyCount == -1 && commitProxyCount == -1) {
+			int derivedGrvProxyCount =
+			    std::max(1,
+			             std::min(CLIENT_KNOBS->DEFAULT_MAX_GRV_PROXIES,
+			                      proxiesCount / (CLIENT_KNOBS->DEFAULT_COMMIT_GRV_PROXIES_RATIO + 1)));
+			int derivedCommitProxyCount = proxiesCount - derivedGrvProxyCount;
+			grvProxyCount = derivedGrvProxyCount;
+			commitProxyCount = derivedCommitProxyCount;
+		}
+	}
+}
+
 bool DatabaseConfiguration::setInternal(KeyRef key, ValueRef value) {
 	KeyRef ck = key.removePrefix(configKeysPrefix);
 	int type;
@@ -473,9 +498,21 @@ bool DatabaseConfiguration::setInternal(KeyRef key, ValueRef value) {
 	if (ck == LiteralStringRef("initialized")) {
 		initialized = true;
 	} else if (ck == LiteralStringRef("commit_proxies")) {
-		parse(&commitProxyCount, value);
+		int newValue = toInt(value);
+		int proxiesCount = commitProxyCount + grvProxyCount;
+		if (newValue == -1 && proxiesCount > 1) {
+			overwriteProxiesCount(commitProxyCount + grvProxyCount);
+		} else {
+			commitProxyCount = newValue;
+		}
 	} else if (ck == LiteralStringRef("grv_proxies")) {
-		parse(&grvProxyCount, value);
+		int newValue = toInt(value);
+		int proxiesCount = commitProxyCount + grvProxyCount;
+		if (newValue == -1 && proxiesCount > 1) {
+			overwriteProxiesCount(commitProxyCount + grvProxyCount);
+		} else {
+			grvProxyCount = newValue;
+		}
 	} else if (ck == LiteralStringRef("resolvers")) {
 		parse(&resolverCount, value);
 	} else if (ck == LiteralStringRef("logs")) {
@@ -557,21 +594,8 @@ bool DatabaseConfiguration::setInternal(KeyRef key, ValueRef value) {
 		parse((&type), value);
 		storageMigrationType = (StorageMigrationType::MigrationType)type;
 	} else if (ck == LiteralStringRef("proxies")) {
-		int proxiesCount;
-		parse(&proxiesCount, value);
-		if (proxiesCount > 1) {
-			int derivedGrvProxyCount =
-			    std::max(1,
-			             std::min(CLIENT_KNOBS->DEFAULT_MAX_GRV_PROXIES,
-			                      proxiesCount / (CLIENT_KNOBS->DEFAULT_COMMIT_GRV_PROXIES_RATIO + 1)));
-			int derivedCommitProxyCount = proxiesCount - derivedGrvProxyCount;
-			if (grvProxyCount == -1) {
-				grvProxyCount = derivedGrvProxyCount;
-			}
-			if (commitProxyCount == -1) {
-				commitProxyCount = derivedCommitProxyCount;
-			}
-		}
+		int proxiesCount = toInt(value);
+		overwriteProxiesCount(proxiesCount);
 	} else {
 		return false;
 	}
