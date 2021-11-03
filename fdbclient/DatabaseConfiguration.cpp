@@ -478,13 +478,7 @@ void DatabaseConfiguration::overwriteProxiesCount(ValueRef const& value) {
 
 	const int mutableGrvProxyCount = optGrvProxies.present() ? toInt(optGrvProxies.get()) : 0;
 	const int mutableCommitProxyCount = optCommitProxies.present() ? toInt(optCommitProxies.get()) : 0;
-	int proxiesCount = -1;
-
-	if (value.size() == 0) {
-		proxiesCount = mutableGrvProxyCount + mutableCommitProxyCount;
-	} else {
-		proxiesCount = toInt(value);
-	}
+	const int proxiesCount = value.empty() ? mutableGrvProxyCount + mutableCommitProxyCount : toInt(value);
 
 	if (proxiesCount > 1) {
 		TraceEvent("OverwriteProxiesCount before")
