@@ -472,21 +472,31 @@ std::string DatabaseConfiguration::toString() const {
 	return json_spirit::write_string(json_spirit::mValue(toJSON()), json_spirit::Output_options::none);
 }
 
+Key getKeyWithPrefix(std::string const &k) {
+	return StringRef(k).withPrefix(configKeysPrefix);
+}
+
 void DatabaseConfiguration::overwriteProxiesCount(ValueRef const& value) {
-	Optional<ValueRef> optCommitProxies = DatabaseConfiguration::get(LiteralStringRef("commit_proxies"));
-	Optional<ValueRef> optGrvProxies = DatabaseConfiguration::get(LiteralStringRef("grv_proxies"));
+	Key commitProxiesKey = getKeyWithPrefix("commit_proxies");
+	Key grvProxiesKey = getKeyWithPrefix("grv_proxies");
+	Key proxiesKey = getKeyWithPrefix("proxies");
+	Optional<ValueRef> optCommitProxies = DatabaseConfiguration::get(commitProxiesKey);
+	Optional<ValueRef> optGrvProxies = DatabaseConfiguration::get(grvProxiesKey);
+	Optional<ValueRef> optProxies = DatabaseConfiguration::get(proxiesKey);
 
 	const int mutableGrvProxyCount = optGrvProxies.present() ? toInt(optGrvProxies.get()) : 0;
 	const int mutableCommitProxyCount = optCommitProxies.present() ? toInt(optCommitProxies.get()) : 0;
-	const int proxiesCount = value.empty() ? mutableGrvProxyCount + mutableCommitProxyCount : toInt(value);
+	const int mutableProxiesCount = optProxies.present() ? toInt(optProxies.get()) : 0;
+	const int proxiesCount = value.empty() ? mutableProxiesCount : toInt(value);
 
 	if (proxiesCount > 1) {
 		TraceEvent("OverwriteProxiesCount before")
 		    .detail("CPCount", commitProxyCount)
-			.detail("MutableCPCount", mutableCommitProxyCount)
+		    .detail("MutableCPCount", mutableCommitProxyCount)
 		    .detail("GrvCount", grvProxyCount)
-			.detail("MutableGrvCPCount", mutableGrvProxyCount)
-		    .detail("ProxiesCount", proxiesCount);
+		    .detail("MutableGrvCPCount", mutableGrvProxyCount)
+		    .detail("ProxiesCount", proxiesCount)
+		    .detail("MutableProxiesCount", mutableProxiesCount);
 
 		if (grvProxyCount == -1 && commitProxyCount > 0) {
 			if (proxiesCount > commitProxyCount) {
