@@ -20,6 +20,7 @@
 
 #include "fdbclient/DatabaseConfiguration.h"
 #include "fdbclient/SystemData.h"
+#include "flow/ITrace.h"
 #include "flow/genericactors.actor.h"
 
 DatabaseConfiguration::DatabaseConfiguration() {
@@ -471,23 +472,59 @@ std::string DatabaseConfiguration::toString() const {
 	return json_spirit::write_string(json_spirit::mValue(toJSON()), json_spirit::Output_options::none);
 }
 
-void DatabaseConfiguration::overwriteProxiesCount(int const& proxiesCount) {
+void DatabaseConfiguration::overwriteProxiesCount(ValueRef const& value) {
+	Optional<ValueRef> optCommitProxies = DatabaseConfiguration::get(LiteralStringRef("commit_proxies"));
+	Optional<ValueRef> optGrvProxies = DatabaseConfiguration::get(LiteralStringRef("grv_proxies"));
+
+	const int mutableGrvProxyCount = optGrvProxies.present() ? toInt(optGrvProxies.get()) : 0;
+	const int mutableCommitProxyCount = optCommitProxies.present() ? toInt(optCommitProxies.get()) : 0;
+	int proxiesCount = -1;
+
+	if (value.size() == 0) {
+		proxiesCount = mutableGrvProxyCount + mutableCommitProxyCount;
+	} else {
+		proxiesCount = toInt(value);
+	}
+
 	if (proxiesCount > 1) {
+		TraceEvent("OverwriteProxiesCount before")
+		    .detail("CPCount", commitProxyCount)
+			.detail("MutableCPCount", mutableCommitProxyCount)
+		    .detail("GrvCount", grvProxyCount)
+			.detail("MutableGrvCPCount", mutableGrvProxyCount)
+		    .detail("ProxiesCount", proxiesCount);
+
 		if (grvProxyCount == -1 && commitProxyCount > 0) {
-			ASSERT(proxiesCount > commitProxyCount);
-			grvProxyCount = proxiesCount - commitProxyCount;
+			if (proxiesCount > commitProxyCount) {
+				grvProxyCount = proxiesCount - commitProxyCount;
+			} else {
+				// invalid configuration; provision min GrvProxies
+				grvProxyCount = 1;
+				commitProxyCount = proxiesCount - 1;
+			}
 		} else if (grvProxyCount > 0 && commitProxyCount == -1) {
-			ASSERT(proxiesCount > grvProxyCount);
-			commitProxyCount = proxiesCount - grvProxyCount;
+			if (proxiesCount > grvProxyCount) {
+				commitProxyCount = proxiesCount - grvProxyCount;
+			} else {
+				// invalid configuration; provision min CommitProxies
+				commitProxyCount = 1;
+				grvProxyCount = proxiesCount - 1;
+			}
 		} else if (grvProxyCount == -1 && commitProxyCount == -1) {
-			int derivedGrvProxyCount =
+			// Use DEFAULT_COMMIT_GRV_PROXIES_RATIO to split proxies between Grv & Commit proxies
+			const int derivedGrvProxyCount =
 			    std::max(1,
 			             std::min(CLIENT_KNOBS->DEFAULT_MAX_GRV_PROXIES,
 			                      proxiesCount / (CLIENT_KNOBS->DEFAULT_COMMIT_GRV_PROXIES_RATIO + 1)));
-			int derivedCommitProxyCount = proxiesCount - derivedGrvProxyCount;
+
 			grvProxyCount = derivedGrvProxyCount;
-			commitProxyCount = derivedCommitProxyCount;
+			commitProxyCount = proxiesCount - grvProxyCount;
 		}
+
+		TraceEvent("OverwriteProxiesCount after")
+		    .detail("CPCount", commitProxyCount)
+		    .detail("GrvCount", grvProxyCount)
+		    .detail("ProxiesCount", proxiesCount);
 	}
 }
 
@@ -498,21 +535,13 @@ bool DatabaseConfiguration::setInternal(KeyRef key, ValueRef value) {
 	if (ck == LiteralStringRef("initialized")) {
 		initialized = true;
 	} else if (ck == LiteralStringRef("commit_proxies")) {
-		int newValue = toInt(value);
-		int proxiesCount = commitProxyCount + grvProxyCount;
-		if (newValue == -1 && proxiesCount > 1) {
-			overwriteProxiesCount(commitProxyCount + grvProxyCount);
-		} else {
-			commitProxyCount = newValue;
-		}
+		commitProxyCount = toInt(value);
+		if (commitProxyCount == -1)
+			overwriteProxiesCount(StringRef());
 	} else if (ck == LiteralStringRef("grv_proxies")) {
-		int newValue = toInt(value);
-		int proxiesCount = commitProxyCount + grvProxyCount;
-		if (newValue == -1 && proxiesCount > 1) {
-			overwriteProxiesCount(commitProxyCount + grvProxyCount);
-		} else {
-			grvProxyCount = newValue;
-		}
+		grvProxyCount = toInt(value);
+		if (grvProxyCount == -1)
+			overwriteProxiesCount(StringRef());
 	} else if (ck == LiteralStringRef("resolvers")) {
 		parse(&resolverCount, value);
 	} else if (ck == LiteralStringRef("logs")) {
@@ -594,8 +623,7 @@ bool DatabaseConfiguration::setInternal(KeyRef key, ValueRef value) {
 		parse((&type), value);
 		storageMigrationType = (StorageMigrationType::MigrationType)type;
 	} else if (ck == LiteralStringRef("proxies")) {
-		int proxiesCount = toInt(value);
-		overwriteProxiesCount(proxiesCount);
+		overwriteProxiesCount(value);
 	} else {
 		return false;
 	}
