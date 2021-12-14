@@ -788,6 +788,9 @@ void ServerKnobs::initialize(Randomize randomize, ClientKnobs* clientKnobs, IsSi
 
 	init( BLOB_WORKER_TIMEOUT,                                  10.0 ); if( randomize && BUGGIFY ) BLOB_WORKER_TIMEOUT = 1.0;
 
+	// Hackathon-2021
+	init( HACKATHON_TLOG_PLACEMENT_STRATEGY,                       2 );
+	init( BG_DELTA_BYTES_BEFORE_COMPACT, BG_SNAPSHOT_FILE_TARGET_BYTES/2 );
 	// clang-format on
 
 	if (clientKnobs) {

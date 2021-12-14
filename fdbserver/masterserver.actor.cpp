@@ -18,7 +18,9 @@
  * limitations under the License.
  */
 
+#include <climits>
 #include <iterator>
+#include <utility>
 
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbclient/Notified.h"
@@ -245,6 +247,11 @@ struct MasterData : NonCopyable, ReferenceCounted<MasterData> {
 	int8_t safeLocality;
 	int8_t primaryLocality;
 
+	// Hackathon-2021
+	int prvTLogGroup;
+	std::vector<int> tlogBytesTracker;
+	std::map<Version, std::pair<int, int>> tlogVersionInfoTracker;
+
 	std::vector<WorkerInterface> backupWorkers; // Recruited backup workers from cluster controller.
 
 	CounterCollection cc;
@@ -277,8 +284,8 @@ struct MasterData : NonCopyable, ReferenceCounted<MasterData> {
 	    myInterface(myInterface), clusterController(clusterController), cstate(coordinators, addActor, dbgid),
 	    dbInfo(dbInfo), registrationCount(0), addActor(addActor),
 	    recruitmentStalled(makeReference<AsyncVar<bool>>(false)), forceRecovery(forceRecovery), neverCreated(false),
-	    safeLocality(tagLocalityInvalid), primaryLocality(tagLocalityInvalid), cc("Master", dbgid.toString()),
-	    changeCoordinatorsRequests("ChangeCoordinatorsRequests", cc),
+	    safeLocality(tagLocalityInvalid), primaryLocality(tagLocalityInvalid), prvTLogGroup(-1),
+	    cc("Master", dbgid.toString()), changeCoordinatorsRequests("ChangeCoordinatorsRequests", cc),
 	    getCommitVersionRequests("GetCommitVersionRequests", cc),
 	    backupWorkerDoneRequests("BackupWorkerDoneRequests", cc),
 	    getLiveCommittedVersionRequests("GetLiveCommittedVersionRequests", cc),
@@ -1179,9 +1186,10 @@ ACTOR Future<Void> getVersion(Reference<MasterData> self, GetCommitVersionReques
 	auto itr = proxyItr->second.replies.find(req.requestNum);
 	if (itr != proxyItr->second.replies.end()) {
 		TEST(true); // Duplicate request for sequence
+		state GetCommitVersionReply response = itr->second;
 		wait(self->liveCommittedVersion.whenAtLeast(itr->second.version -
 		                                            SERVER_KNOBS->MAX_READ_TRANSACTION_LIFE_VERSIONS));
-		req.reply.send(itr->second);
+		req.reply.send(response);
 	} else if (req.requestNum <= proxyItr->second.latestRequestNum.get()) {
 		TEST(true); // Old request for previously acknowledged sequence - may be impossible with current FlowTransport
 		ASSERT(req.requestNum <
@@ -1229,7 +1237,31 @@ ACTOR Future<Void> getVersion(Reference<MasterData> self, GetCommitVersionReques
 				groupVersion = self->version;
 			}
 		} else {
-			int tlogGroup = deterministicRandom()->randomInt(0, self->tLogGroups);
+			// Hackathon - 2021
+			// 0 -> Random tlog group selection
+			// 1 -> Round-robin tlog group selection
+			// 2 -> least-loaded tlog group selection
+			const int mode = SERVER_KNOBS->HACKATHON_TLOG_PLACEMENT_STRATEGY;
+			int tlogGroup = -1;
+			if (mode == 0) {
+				tlogGroup = deterministicRandom()->randomInt(0, self->tLogGroups);
+			} else if (mode == 1) {
+				tlogGroup = self->prvTLogGroup == -1 ? 0 : (self->prvTLogGroup + 1) % self->tLogGroups;
+			} else {
+				ASSERT(mode == 2);
+				// determine the least loaded TLog using bytes tracker map
+				tlogGroup = 0;
+				int minTLogBytes = self->tlogBytesTracker[tlogGroup];
+				for (int i = 1; i < self->tLogGroups; i++) {
+					if (self->tlogBytesTracker[i] < minTLogBytes) {
+						minTLogBytes = self->tlogBytesTracker[i];
+						tlogGroup = i;
+					}
+				}
+				// record the version <-> {tlogGroup, bytes} information
+				ASSERT(self->tlogVersionInfoTracker.find(self->version) == self->tlogVersionInfoTracker.end());
+				self->tlogVersionInfoTracker[self->version] = std::make_pair(tlogGroup, req.commitBytes); 
+			}
 			auto& groupVersion = self->tLogGroupVersions[tlogGroup];
 			rep.tlogGroups.push_back(std::make_pair(tlogGroup, groupVersion));
 			groupVersion = self->version;
@@ -1277,6 +1309,18 @@ ACTOR Future<Void> handleCommitVersion(Reference<MasterData> self, ReportRawComm
 		self->databaseLocked = req.locked;
 		self->proxyMetadataVersion = req.metadataVersion;
 	}
+
+	// update tlog byte tracker with completed commit
+	auto itr = self->tlogVersionInfoTracker.find(req.version);
+	ASSERT(itr != self->tlogVersionInfoTracker.end());
+	int commitBytes = itr->second.second;
+	int tlogGroup = itr->second.first;
+	ASSERT(tlogGroup < self->tLogGroups);
+	ASSERT(self->tlogBytesTracker[tlogGroup] >= commitBytes);
+	self->tlogBytesTracker[tlogGroup] -= commitBytes;
+	// remove tracking commit version {tlogGroup, bytes} info
+	self->tlogVersionInfoTracker.erase(req.version);
+
 	++self->reportLiveCommittedVersionRequests;
 	req.reply.send(Void());
 	return Void();
@@ -1958,6 +2002,7 @@ ACTOR Future<Void> masterCore(Reference<MasterData> self) {
 	TraceEvent("MasterRecoveryCommit", self->dbgid).log();
 	self->tLogGroups = self->logSystem->getTLogGroups();
 	self->tLogGroupVersions.resize(self->tLogGroups, self->lastEpochEnd);
+	self->tlogBytesTracker.resize(self->tLogGroups);
 	self->liveCommittedVersion.set(self->lastEpochEnd);
 	state Future<ErrorOr<CommitID>> recoveryCommit = self->commitProxies[0].commit.tryGetReply(recoveryCommitRequest);
 	self->addActor.send(self->logSystem->onError());
