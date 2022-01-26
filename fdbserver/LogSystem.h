@@ -782,7 +782,7 @@ struct LogPushData : NonCopyable {
 	// in the middle of data for a version
 
 	explicit LogPushData(Reference<ILogSystem> logSystem)
-	  : logSystem(logSystem), subsequence(1), messagesWriter(AssumeVersion(g_network->protocolVersion())) {}
+	  : logSystem(logSystem), messagesWriter(AssumeVersion(g_network->protocolVersion())), subsequence(1) {}
 
 	void addTxsTag();
 
