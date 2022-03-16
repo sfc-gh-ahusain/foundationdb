@@ -179,7 +179,7 @@ struct EncryptionOpsWorkload : TestWorkload {
 			auto start = std::chrono::high_resolution_clock::now();
 			auto& cipherKeyCache = BlobCipherKeyCache::getInstance();
 			cipherKeyCache.insertCipherKey(domainId, domainId, parentCipher.get(), AES_256_KEY_LENGTH);
-			Reference<BlobCipherKey> cipherKey = cipherKeyCache.getLatestCipherKey(domainId, domainId);
+			Reference<BlobCipherKey> cipherKey = cipherKeyCache.getLatestCipherKey(domainId);
 			auto end = std::chrono::high_resolution_clock::now();
 			metrics->updateKeyDerivationTime(std::chrono::duration<double, std::nano>(end - start).count());
 

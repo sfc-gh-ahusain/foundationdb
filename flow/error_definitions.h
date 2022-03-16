@@ -281,6 +281,13 @@ ERROR( snap_log_anti_quorum_unsupported, 2507, "Unsupported when log anti quorum
 ERROR( snap_with_recovery_unsupported, 2508, "Cluster recovery during snapshot operation not supported")
 ERROR( snap_invalid_uid_string, 2509, "The given uid string is not a 32-length hex string")
 
+// 3000 - Encryption operations related errors
+ERROR( encrypt_key_not_found, 3000, "Expected encryption key is missing")
+ERROR( encrypt_key_ttl_expired, 3001, "Expected encryption key TTL has expired")
+ERROR( encrypt_header_checksum_failed, 3002, "Encryption header checksum failed")
+ERROR( encrypt_update_cipher, 3003, "Attempt to update encryption cipher key")
+ERROR( encrypt_invalid_id, 3004, "Invalid encyrption domainId or encyrption cipher key id")
+
 // 4xxx Internal errors (those that should be generated only by bugs) are decimal 4xxx
 ERROR( unknown_error, 4000, "An unknown error occurred" )  // C++ exception not of type Error
 ERROR( internal_error, 4100, "An internal error occurred" )

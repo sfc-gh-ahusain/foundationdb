@@ -20,13 +20,17 @@
 #pragma once
 
 #include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
 #if (!defined(TLS_DISABLED) && !defined(_WIN32))
 #define ENCRYPTION_ENABLED 1
 #else
 #define ENCRYPTION_ENABLED 0
 #endif
 
-#if ENCRYPTION_ENABLED
+//#if ENCRYPTION_ENABLED
 
 #include "flow/Arena.h"
 #include "flow/FastRef.h"
@@ -38,12 +42,12 @@
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
-#include <string>
-#include <vector>
 
 #define AES_256_KEY_LENGTH 32
 #define AES_256_TAG_LENGTH 16
 #define AES_256_IV_LENGTH 16
+#define INVALID_DOMAIN_ID 0
+#define INVALID_CIPHER_KEY_ID 0
 
 using BlobCipherDomainId = uint64_t;
 using BlobCipherRandomSalt = uint64_t;
@@ -54,15 +58,16 @@ using BlobCipherChecksum = XXH64_hash_t;
 typedef enum { BLOB_CIPHER_ENCRYPT_MODE_NONE = 0, BLOB_CIPHER_ENCRYPT_MODE_AES_256_CTR = 1 } BlockCipherEncryptMode;
 
 // BlobCipher Encryption header format
-// The header is persisted as 'plaintext' for encrypted block containing sufficient information for encryption key
-// regeneration to assit decryption on reads. The total space overhead is 40 bytes.
+// The header is persisted as 'plaintext' for encrypted block containing
+// sufficient information for encryption key regeneration to assit decryption on
+// reads. The total space overhead is 40 bytes.
 
 #pragma pack(push, 1) // exact fit - no padding
 typedef struct BlobCipherEncryptHeader {
 	union {
 		struct {
-			uint8_t
-			    size; // reading first byte is sufficient to determine header length. ALWAYS THE FIRST HEADER ELEMENT.
+			uint8_t size; // reading first byte is sufficient to determine header
+			              // length. ALWAYS THE FIRST HEADER ELEMENT.
 			uint8_t headerVersion{};
 			uint8_t encryptMode{};
 			uint8_t _reserved[5]{};
@@ -78,8 +83,10 @@ typedef struct BlobCipherEncryptHeader {
 } BlobCipherEncryptHeader;
 #pragma pack(pop)
 
-// This interface is in-memory representation of CipherKey used for encryption/decryption information. It caches base
-// encryption key properties as well as apply HMAC_SHA_256 derivation technique to generate a new encryption key.
+// This interface is in-memory representation of CipherKey used for
+// encryption/decryption information. It caches base encryption key properties
+// as well as apply HMAC_SHA_256 derivation technique to generate a new
+// encryption key.
 
 class BlobCipherKey : public ReferenceCounted<BlobCipherKey>, NonCopyable {
 	// Encryption domain boundary identifier
@@ -119,61 +126,50 @@ public:
 	void reset();
 };
 
-// This interface allows FDB processes participating in encryption to store and index recently used encyption cipher
-// keys. FDB encryption has three dimensions:
+// This interface allows FDB processes participating in encryption to store and
+// index recently used encyption cipher keys. FDB encryption has three
+// dimensions:
 // 1. Mapping on cipher encryption keys per "encryption domains"
-// 2. Per encryption domain, the cipher keys are index using "baseCipherKeyId"
-// 3. Within baseCipherKey ids indexed encryption keys, cipher keys are indexed based on the "randomSalt" used to apply
-// HMAC-SHA256 derivation.
-//                  { encryptionDomain -> { baseCipherId -> { randomSalt, cipherKey } } }
+// 2. Per encryption domain, the cipher keys are index using "baseCipherKeyId".
+// The design supports NIST recommendation of limiting lifetime of an encryption
+// key. For details refer to:
+// https://csrc.nist.gov/publications/detail/sp/800-57-part-1/rev-3/archive/2012-07-10
+//
+// Below gives a pictoral representation of in-memory datastructure implemented
+// to index encryption keys
+//                  { encryptionDomain -> { baseCipherId -> cipherKey } }
 //
 // Supported cache lookups schemes:
 // 1. Lookup cipher based on { encryptionDomainId, baseCipherKeyId } tuple.
 // 2. Lookup cipher based on BlobCipherEncryptionHeader
 //
-// Client is responsible to handle cache-miss usecase, the corrective operation might vary based on the
-// calling process, for instance: EncryptKeyServer cache-miss shall invoke RPC to external Encryption Key Manager to
-// fetch the required encryption key, however, CPs/SSs cache-miss would result in RPC to EncryptKeyServer to refresh the
-// desired encryption key.
+// Client is responsible to handle cache-miss usecase, the corrective operation
+// might vary based on the calling process, for instance: EncryptKeyServer
+// cache-miss shall invoke RPC to external Encryption Key Manager to fetch the
+// required encryption key, however, CPs/SSs cache-miss would result in RPC to
+// EncryptKeyServer to refresh the desired encryption key.
 
-using BlobCipherKeySaltCache = std::unordered_map<BlobCipherRandomSalt, Reference<BlobCipherKey>>;
+using BlobCipherKeyIdCacheMap = std::unordered_map<BlobCipherBaseKeyId, Reference<BlobCipherKey>>;
+using BlobCipherKeyIdCacheMapCItr = std::unordered_map<BlobCipherBaseKeyId, Reference<BlobCipherKey>>::const_iterator;
 
-class BlobCipherKeyItem : public ReferenceCounted<BlobCipherKeyItem>, NonCopyable {
-	Reference<BlobCipherKey> latest;
-	BlobCipherKeySaltCache keyCache;
+struct BlobCipherKeyIdCache : ReferenceCounted<BlobCipherKeyIdCache> {
+private:
+	BlobCipherDomainId domainId;
+	BlobCipherKeyIdCacheMap keyIdCache;
+	BlobCipherBaseKeyId latestBaseCipherKeyId;
 
 public:
-	BlobCipherKeyItem(Reference<BlobCipherKey>& cipher) { updateLatest(cipher); }
+	BlobCipherKeyIdCache();
+	explicit BlobCipherKeyIdCache(BlobCipherDomainId dId);
 
-	Reference<BlobCipherKey> getLatest() { return latest; }
-
-	void updateLatest(Reference<BlobCipherKey> cipher) {
-		latest = cipher;
-		keyCache.emplace(cipher.getPtr()->getSalt(), cipher);
-	}
-	Reference<BlobCipherKey> findCipher(const BlobCipherRandomSalt& salt) {
-		auto itr = keyCache.find(salt);
-		if (itr == keyCache.end()) {
-			return Reference<BlobCipherKey>();
-		}
-		return itr->second;
-	}
-	void reset() {
-		for (auto& keyItr : keyCache) {
-			keyItr.second.getPtr()->reset();
-		}
-	}
-	std::vector<Reference<BlobCipherKey>> getAllCiphers() {
-		std::vector<Reference<BlobCipherKey>> ciphers;
-		for (auto itr : keyCache) {
-			ciphers.emplace_back(itr.second);
-		}
-		return ciphers;
-	}
+	Reference<BlobCipherKey> getLatestCipherKey();
+	Reference<BlobCipherKey> getCipherByBaseCipherId(BlobCipherBaseKeyId baseCipherKeyId);
+	void insertBaseCipherKey(BlobCipherBaseKeyId baseCipherId, const uint8_t* baseCipher, int baseCipherLen);
+	void resetCipherKeys();
+	std::vector<Reference<BlobCipherKey>> getAllCipherKeys();
 };
 
-using BlobCipherKeyIdCacheMap = std::unordered_map<BlobCipherBaseKeyId, Reference<BlobCipherKeyItem>>;
-using BlobCipherDomainCacheMap = std::unordered_map<BlobCipherDomainId, BlobCipherKeyIdCacheMap>;
+using BlobCipherDomainCacheMap = std::unordered_map<BlobCipherDomainId, Reference<BlobCipherKeyIdCache>>;
 
 class BlobCipherKeyCache : NonCopyable {
 	BlobCipherDomainCacheMap domainCacheMap;
@@ -186,23 +182,22 @@ public:
 	                     const BlobCipherBaseKeyId& baseCipherId,
 	                     const uint8_t* baseCipher,
 	                     int baseCipherLen);
-	Reference<BlobCipherKey> getLatestCipherKey(const BlobCipherDomainId& domainId,
-	                                            const BlobCipherBaseKeyId& baseKeyId);
+	Reference<BlobCipherKey> getLatestCipherKey(const BlobCipherDomainId& domainId);
 	Reference<BlobCipherKey> getCipherKey(const BlobCipherEncryptHeader& header);
-	std::vector<Reference<BlobCipherKey>> getAllCiphers(const BlobCipherDomainId& domainId,
-	                                                    const BlobCipherBaseKeyId& baseKeyId);
+	std::vector<Reference<BlobCipherKey>> getAllCiphers(const BlobCipherDomainId& domainId);
 	static BlobCipherKeyCache& getInstance() {
 		static BlobCipherKeyCache instance;
 		return instance;
 	}
-	// Ensures cached encryption key(s) (plaintext) never gets persisted as part of FDB
-	// process/core dump.
+	// Ensures cached encryption key(s) (plaintext) never gets persisted as part
+	// of FDB process/core dump.
 	static void cleanup() noexcept;
 };
 
-// This interface enables data block encryption. An invocation to encrypt() will do two things: a) generate
-// encrypted ciphertext for given plaintext input. b) generate BlobCipherEncryptHeader (including the 'tag') persiting
-// for decryption on reads.
+// This interface enables data block encryption. An invocation to encrypt() will
+// do two things: a) generate encrypted ciphertext for given plaintext input. b)
+// generate BlobCipherEncryptHeader (including the 'tag') persiting for
+// decryption on reads.
 
 class EncryptBlobCipherAes265Ctr final : NonCopyable, public ReferenceCounted<EncryptBlobCipherAes265Ctr> {
 	EVP_CIPHER_CTX* ctx;
@@ -216,8 +211,9 @@ public:
 	StringRef encrypt(unsigned char const* plaintext, const int plaintextLen, BlobCipherEncryptHeader* header, Arena&);
 };
 
-// This interface enable data block decryption. An invocation to decrypt() would generate 'plaintext' for a given
-// 'ciphertext' input, the caller needs to supply BlobCipherEncryptHeader.
+// This interface enable data block decryption. An invocation to decrypt() would
+// generate 'plaintext' for a given 'ciphertext' input, the caller needs to
+// supply BlobCipherEncryptHeader.
 
 class DecryptBlobCipherAes256Ctr final : NonCopyable, public ReferenceCounted<DecryptBlobCipherAes256Ctr> {
 	EVP_CIPHER_CTX* ctx;
@@ -241,4 +237,4 @@ public:
 	StringRef digest(unsigned char const* data, size_t len, Arena&);
 };
 
-#endif // ENCRYPTION_ENABLED
+//#endif // ENCRYPTION_ENABLED
