@@ -44,7 +44,6 @@
 #include <openssl/sha.h>
 
 #define AES_256_KEY_LENGTH 32
-#define AES_256_TAG_LENGTH 16
 #define AES_256_IV_LENGTH 16
 #define INVALID_DOMAIN_ID 0
 #define INVALID_CIPHER_KEY_ID 0
@@ -123,6 +122,12 @@ public:
 	int getBaseCipherLen() const { return baseCipherLen; }
 	uint8_t* rawCipher() const { return cipher.get(); }
 	uint8_t* rawBaseCipher() const { return baseCipher.get(); }
+	bool isEqual(const Reference<BlobCipherKey> toCompare) {
+		return encryptDomainId == toCompare->getDomainId() && baseCipherId == toCompare->getBaseCipherId() &&
+		       randomSalt == toCompare->getSalt() && baseCipherLen == toCompare->getBaseCipherLen() &&
+		       memcmp(cipher.get(), toCompare->rawCipher(), AES_256_KEY_LENGTH) == 0 &&
+		       memcmp(baseCipher.get(), toCompare->rawBaseCipher(), baseCipherLen) == 0;
+	}
 	void reset();
 };
 
@@ -162,10 +167,20 @@ public:
 	BlobCipherKeyIdCache();
 	explicit BlobCipherKeyIdCache(BlobCipherDomainId dId);
 
+	// API returns the last inserted cipherKey.
+	// If none exists, 'encrypt_key_not_found' is thrown.
 	Reference<BlobCipherKey> getLatestCipherKey();
+	// API returns cipherKey corresponding to input 'baseCipherKeyId'.
+	// If none exists, 'encrypt_key_not_found' is thrown.
 	Reference<BlobCipherKey> getCipherByBaseCipherId(BlobCipherBaseKeyId baseCipherKeyId);
+	// API enables inserting base encryption cipher details to the BlobCipherKeyIdCache.
+	// Given cipherKeys are immutable, attempting to re-insert same 'identical' cipherKey
+	// is treated as a NOP (success), however, an attempt to update cipherKey would throw
+	// 'encrypt_update_cipher' exception.
 	void insertBaseCipherKey(BlobCipherBaseKeyId baseCipherId, const uint8_t* baseCipher, int baseCipherLen);
-	void resetCipherKeys();
+	// API cleanup the cache by dropping all cached cipherKeys
+	void cleanup();
+	// API returns list of all 'cached' cipherKeys
 	std::vector<Reference<BlobCipherKey>> getAllCipherKeys();
 };
 
@@ -178,13 +193,26 @@ class BlobCipherKeyCache : NonCopyable {
 	BlobCipherKeyCache() {}
 
 public:
+	// Enable clients to insert base encryption cipher details to the BlobCipherKeyCache.
+	// The cipherKeys are indexed using 'baseCipherId', given cipherKeys are immutable,
+	// attempting to re-insert same 'identical' cipherKey is treated as a NOP (success),
+	// however, an attempt to update cipherKey would throw 'encrypt_update_cipher' exception.
 	void insertCipherKey(const BlobCipherDomainId& domainId,
 	                     const BlobCipherBaseKeyId& baseCipherId,
 	                     const uint8_t* baseCipher,
 	                     int baseCipherLen);
+	// API returns the last insert cipherKey for a given encyryption domain Id.
+	// If none exists, it would throw 'encrypt_key_not_found' exception.
 	Reference<BlobCipherKey> getLatestCipherKey(const BlobCipherDomainId& domainId);
-	Reference<BlobCipherKey> getCipherKey(const BlobCipherEncryptHeader& header);
+	// API returns cipherKey corresponding to {encryptionDomainId, baseCipherId} tuple.
+	// If none exists, it would throw 'encrypt_key_not_found' exception.
+	Reference<BlobCipherKey> getCipherKey(const BlobCipherDomainId& domainId, const BlobCipherBaseKeyId& baseCipherId);
+	// API returns point in time list of all 'cached' cipherKeys for a given encryption domainId.
 	std::vector<Reference<BlobCipherKey>> getAllCiphers(const BlobCipherDomainId& domainId);
+	// API enables dropping all 'cached' cipherKeys for a given encryption domain Id.
+	// Useful to cleanup cache if an encryption domain gets removed/destroyed etc.
+	void resetEncyrptDomainId(const BlobCipherDomainId domainId);
+
 	static BlobCipherKeyCache& getInstance() {
 		static BlobCipherKeyCache instance;
 		return instance;
@@ -196,8 +224,8 @@ public:
 
 // This interface enables data block encryption. An invocation to encrypt() will
 // do two things: a) generate encrypted ciphertext for given plaintext input. b)
-// generate BlobCipherEncryptHeader (including the 'tag') persiting for
-// decryption on reads.
+// generate BlobCipherEncryptHeader (including the 'header checksum') and persit
+// for decryption on reads.
 
 class EncryptBlobCipherAes265Ctr final : NonCopyable, public ReferenceCounted<EncryptBlobCipherAes265Ctr> {
 	EVP_CIPHER_CTX* ctx;
@@ -218,6 +246,11 @@ public:
 class DecryptBlobCipherAes256Ctr final : NonCopyable, public ReferenceCounted<DecryptBlobCipherAes256Ctr> {
 	EVP_CIPHER_CTX* ctx;
 
+	void verifyEncryptBlobHeader(unsigned char const* cipherText,
+	                             const int ciphertextLen,
+	                             const BlobCipherEncryptHeader& header,
+	                             Arena& arena);
+
 public:
 	DecryptBlobCipherAes256Ctr(Reference<BlobCipherKey> key, const BlobCipherIV& iv);
 	~DecryptBlobCipherAes256Ctr();
@@ -236,5 +269,10 @@ public:
 	HMAC_CTX* getCtx() const { return ctx; }
 	StringRef digest(unsigned char const* data, size_t len, Arena&);
 };
+
+BlobCipherChecksum computeEncryptChecksum(unsigned char const* payload,
+                                          const int payloadLen,
+                                          const BlobCipherRandomSalt& salt,
+                                          Arena& arena);
 
 //#endif // ENCRYPTION_ENABLED
