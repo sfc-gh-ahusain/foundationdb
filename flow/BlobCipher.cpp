@@ -18,11 +18,6 @@
  * limitations under the License.
  */
 
-#include <cstring>
-#include <memory>
-
-//#if ENCRYPTION_ENABLED
-
 #include "flow/BlobCipher.h"
 #include "flow/Error.h"
 #include "flow/FastRef.h"
@@ -31,6 +26,11 @@
 #include "flow/network.h"
 #include "flow/Trace.h"
 #include "flow/UnitTest.h"
+
+#include <cstring>
+#include <memory>
+
+#if ENCRYPTION_ENABLED
 
 // BlobCipherEncryptHeader
 BlobCipherEncryptHeader::BlobCipherEncryptHeader() {
@@ -274,13 +274,14 @@ EncryptBlobCipherAes265Ctr::EncryptBlobCipherAes265Ctr(Reference<BlobCipherKey> 
 	}
 }
 
-StringRef EncryptBlobCipherAes265Ctr::encrypt(const uint8_t* plaintext,
-                                              const int plaintextLen,
-                                              BlobCipherEncryptHeader* header,
-                                              Arena& arena) {
+Reference<EncryptBuf> EncryptBlobCipherAes265Ctr::encrypt(const uint8_t* plaintext,
+                                                          const int plaintextLen,
+                                                          BlobCipherEncryptHeader* header,
+                                                          Arena& arena) {
 	TEST(true); // Encrypting data with BlobCipher
 
-	auto ciphertext = new (arena) uint8_t[plaintextLen + AES_BLOCK_SIZE];
+	Reference<EncryptBuf> encryptBuf = makeReference<EncryptBuf>(plaintextLen + AES_BLOCK_SIZE, arena);
+	uint8_t* ciphertext = encryptBuf->begin();
 	int bytes{ 0 };
 	if (EVP_EncryptUpdate(ctx, ciphertext, &bytes, plaintext, plaintextLen) != 1) {
 		TraceEvent("Encrypt_UpdateFailed")
@@ -318,7 +319,8 @@ StringRef EncryptBlobCipherAes265Ctr::encrypt(const uint8_t* plaintext,
 
 	header->ciphertextChecksum = computeEncryptChecksum(ciphertext, bytes + finalBytes, cipherKey->getSalt(), arena);
 
-	return StringRef(arena, ciphertext, bytes + finalBytes);
+	encryptBuf->setLogicalSize(plaintextLen);
+	return encryptBuf;
 }
 
 EncryptBlobCipherAes265Ctr::~EncryptBlobCipherAes265Ctr() {
@@ -369,15 +371,16 @@ void DecryptBlobCipherAes256Ctr::verifyEncryptBlobHeader(const uint8_t* cipherte
 	}
 }
 
-StringRef DecryptBlobCipherAes256Ctr::decrypt(const uint8_t* ciphertext,
-                                              const int ciphertextLen,
-                                              const BlobCipherEncryptHeader& header,
-                                              Arena& arena) {
+Reference<EncryptBuf> DecryptBlobCipherAes256Ctr::decrypt(const uint8_t* ciphertext,
+                                                          const int ciphertextLen,
+                                                          const BlobCipherEncryptHeader& header,
+                                                          Arena& arena) {
 	TEST(true); // Decrypting data with BlobCipher
 
 	verifyEncryptBlobHeader(ciphertext, ciphertextLen, header, arena);
 
-	auto plaintext = new (arena) uint8_t[ciphertextLen + AES_BLOCK_SIZE];
+	Reference<EncryptBuf> decrypted = makeReference<EncryptBuf>(ciphertextLen + AES_BLOCK_SIZE, arena);
+	uint8_t* plaintext = decrypted->begin();
 	int bytesDecrypted{ 0 };
 	if (!EVP_DecryptUpdate(ctx, plaintext, &bytesDecrypted, ciphertext, ciphertextLen)) {
 		TraceEvent("Decrypt_UpdateFailed")
@@ -385,6 +388,7 @@ StringRef DecryptBlobCipherAes256Ctr::decrypt(const uint8_t* ciphertext,
 		    .detail("EncryptDomainId", header.encryptDomainId);
 		throw encrypt_ops_error();
 	}
+
 	int finalBlobBytes{ 0 };
 	if (EVP_DecryptFinal_ex(ctx, plaintext + bytesDecrypted, &finalBlobBytes) <= 0) {
 		TraceEvent("Decrypt_FinalFailed")
@@ -392,7 +396,16 @@ StringRef DecryptBlobCipherAes256Ctr::decrypt(const uint8_t* ciphertext,
 		    .detail("EncryptDomainId", header.encryptDomainId);
 		throw encrypt_ops_error();
 	}
-	return StringRef(arena, plaintext, bytesDecrypted + finalBlobBytes);
+
+	if ((bytesDecrypted + finalBlobBytes) != ciphertextLen) {
+		TraceEvent("Encrypt_UnexpectedPlaintextLen")
+		    .detail("CiphertextLen", ciphertextLen)
+		    .detail("DecryptedBufLen", bytesDecrypted + finalBlobBytes);
+		throw encrypt_ops_error();
+	}
+
+	decrypted->setLogicalSize(ciphertextLen);
+	return decrypted;
 }
 
 DecryptBlobCipherAes256Ctr::~DecryptBlobCipherAes256Ctr() {
@@ -536,7 +549,6 @@ TEST_CASE("flow/BlobCipher") {
 	Reference<BlobCipherKey> cipherKey = cipherKeyCache.getLatestCipherKey(minDomainId);
 	const int bufLen = deterministicRandom()->randomInt(786, 2127) + 512;
 	uint8_t orgData[bufLen];
-	uint8_t encryptedData[bufLen];
 	generateRandomData(&orgData[0], bufLen);
 
 	Arena arena;
@@ -546,11 +558,10 @@ TEST_CASE("flow/BlobCipher") {
 	// validate basic encrypt followed by decrypt operation
 	EncryptBlobCipherAes265Ctr encryptor(cipherKey, iv, AES_256_IV_LENGTH);
 	BlobCipherEncryptHeader header;
-	auto encrypted = encryptor.encrypt(&orgData[0], bufLen, &header, arena);
-	std::copy(encrypted.begin(), encrypted.end(), encryptedData);
+	Reference<EncryptBuf> encrypted = encryptor.encrypt(&orgData[0], bufLen, &header, arena);
 
-	ASSERT(encrypted.size() == bufLen);
-	ASSERT(memcmp(&orgData[0], &encryptedData[0], bufLen) != 0);
+	ASSERT(encrypted->getLogicalSize() == bufLen);
+	ASSERT(memcmp(&orgData[0], encrypted->begin(), bufLen) != 0);
 	ASSERT(header.flags.headerVersion == EncryptBlobCipherAes265Ctr::ENCRYPT_HEADER_VERSION);
 	ASSERT(header.flags.encryptMode == BLOB_CIPHER_ENCRYPT_MODE_AES_256_CTR);
 
@@ -564,19 +575,17 @@ TEST_CASE("flow/BlobCipher") {
 	Reference<BlobCipherKey> encyrptKey = cipherKeyCache.getCipherKey(header.encryptDomainId, header.baseCipherId);
 	ASSERT(encyrptKey->isEqual(cipherKey));
 	DecryptBlobCipherAes256Ctr decryptor(encyrptKey, &header.iv[0]);
-	uint8_t decryptedData[bufLen];
-	auto decrypted = decryptor.decrypt(&encryptedData[0], bufLen, header, arena);
+	Reference<EncryptBuf> decrypted = decryptor.decrypt(encrypted->begin(), bufLen, header, arena);
 
-	ASSERT(decrypted.size() == bufLen);
-	std::copy(decrypted.begin(), decrypted.end(), decryptedData);
-	ASSERT(memcmp(&decryptedData[0], &orgData[0], bufLen) == 0);
+	ASSERT(decrypted->getLogicalSize() == bufLen);
+	ASSERT(memcmp(decrypted->begin(), &orgData[0], bufLen) == 0);
 
 	TraceEvent("BlobCipherTest_DecryptDone").log();
 
 	// induce encyrption header corruption - headerVersion corrupted
 	header.flags.headerVersion += 1;
 	try {
-		decrypted = decryptor.decrypt(&encryptedData[0], bufLen, header, arena);
+		decrypted = decryptor.decrypt(encrypted->begin(), bufLen, header, arena);
 	} catch (Error& e) {
 		if (e.code() != error_code_encrypt_header_metadata_mismatch) {
 			throw;
@@ -587,7 +596,7 @@ TEST_CASE("flow/BlobCipher") {
 	// induce encyrption header corruption - encryptionMode corrupted
 	header.flags.encryptMode += 1;
 	try {
-		decrypted = decryptor.decrypt(&encryptedData[0], bufLen, header, arena);
+		decrypted = decryptor.decrypt(encrypted->begin(), bufLen, header, arena);
 	} catch (Error& e) {
 		if (e.code() != error_code_encrypt_header_metadata_mismatch) {
 			throw;
@@ -598,7 +607,7 @@ TEST_CASE("flow/BlobCipher") {
 	// induce encyrption header corruption - checksum mismatch
 	header.ciphertextChecksum += 1;
 	try {
-		decrypted = decryptor.decrypt(&encryptedData[0], bufLen, header, arena);
+		decrypted = decryptor.decrypt(encrypted->begin(), bufLen, header, arena);
 	} catch (Error& e) {
 		if (e.code() != error_code_encrypt_header_checksum_mismatch) {
 			throw;
@@ -639,4 +648,4 @@ BlobCipherChecksum computeEncryptChecksum(const uint8_t* payload,
 	return checksum;
 }
 
-//#endif // ENCRYPTION_ENABLED
+#endif // ENCRYPTION_ENABLED

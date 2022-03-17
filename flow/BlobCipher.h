@@ -30,7 +30,7 @@
 #define ENCRYPTION_ENABLED 0
 #endif
 
-//#if ENCRYPTION_ENABLED
+#if ENCRYPTION_ENABLED
 
 #include "flow/Arena.h"
 #include "flow/FastRef.h"
@@ -54,6 +54,35 @@ using BlobCipherBaseKeyId = uint64_t;
 using BlobCipherChecksum = uint64_t;
 
 typedef enum { BLOB_CIPHER_ENCRYPT_MODE_NONE = 0, BLOB_CIPHER_ENCRYPT_MODE_AES_256_CTR = 1 } BlockCipherEncryptMode;
+
+// Encryption operations buffer management
+// Approach limits number of copies needed durign encyrption or decryption operations.
+// For encryption EncryptBuf allocated using client supplied Arena is provided to AES library to store
+// the ciphertext. Similarly, on decryption EncryptBuf is allocated using client supplied Arena to provided
+// to the AES library for decryption and passed back to the clients.
+
+class EncryptBuf : public ReferenceCounted<EncryptBuf>, NonCopyable {
+public:
+	EncryptBuf(int size, Arena& arena) : allocSize(size), logicalSize(size) {
+		if (size > 0) {
+			buffer = new (arena) uint8_t[size];
+		} else {
+			buffer = nullptr;
+		}
+	}
+
+	int getLogicalSize() { return logicalSize; }
+	void setLogicalSize(int value) {
+		ASSERT(value <= allocSize);
+		logicalSize = value;
+	}
+	uint8_t* begin() { return buffer; }
+
+private:
+	int allocSize;
+	int logicalSize;
+	uint8_t* buffer;
+};
 
 // BlobCipher Encryption header format
 // The header is persisted as 'plaintext' for encrypted block containing
@@ -94,26 +123,6 @@ typedef struct BlobCipherEncryptHeader {
 // encryption key.
 
 class BlobCipherKey : public ReferenceCounted<BlobCipherKey>, NonCopyable {
-	// Encryption domain boundary identifier
-	BlobCipherDomainId encryptDomainId;
-	// Base encryption cipher key properties
-	std::unique_ptr<uint8_t[]> baseCipher;
-	int baseCipherLen;
-	BlobCipherBaseKeyId baseCipherId;
-	// Random salt used for encryption cipher key derivation
-	BlobCipherRandomSalt randomSalt;
-	// Creation timestamp for the derived encryption cipher key
-	uint64_t creationTime;
-	// Derived encryption cipher key
-	std::unique_ptr<uint8_t[]> cipher;
-
-	void initKey(const BlobCipherDomainId& domainId,
-	             const uint8_t* baseCiph,
-	             int baseCiphLen,
-	             const BlobCipherBaseKeyId& baseCiphId,
-	             const BlobCipherRandomSalt& salt);
-	void applyHmacSha256Derivation();
-
 public:
 	BlobCipherKey(const BlobCipherDomainId& domainId,
 	              const BlobCipherBaseKeyId& baseCiphId,
@@ -135,6 +144,27 @@ public:
 		       memcmp(baseCipher.get(), toCompare->rawBaseCipher(), baseCipherLen) == 0;
 	}
 	void reset();
+
+private:
+	// Encryption domain boundary identifier
+	BlobCipherDomainId encryptDomainId;
+	// Base encryption cipher key properties
+	std::unique_ptr<uint8_t[]> baseCipher;
+	int baseCipherLen;
+	BlobCipherBaseKeyId baseCipherId;
+	// Random salt used for encryption cipher key derivation
+	BlobCipherRandomSalt randomSalt;
+	// Creation timestamp for the derived encryption cipher key
+	uint64_t creationTime;
+	// Derived encryption cipher key
+	std::unique_ptr<uint8_t[]> cipher;
+
+	void initKey(const BlobCipherDomainId& domainId,
+	             const uint8_t* baseCiph,
+	             int baseCiphLen,
+	             const BlobCipherBaseKeyId& baseCiphId,
+	             const BlobCipherRandomSalt& salt);
+	void applyHmacSha256Derivation();
 };
 
 // This interface allows FDB processes participating in encryption to store and
@@ -164,11 +194,6 @@ using BlobCipherKeyIdCacheMap = std::unordered_map<BlobCipherBaseKeyId, Referenc
 using BlobCipherKeyIdCacheMapCItr = std::unordered_map<BlobCipherBaseKeyId, Reference<BlobCipherKey>>::const_iterator;
 
 struct BlobCipherKeyIdCache : ReferenceCounted<BlobCipherKeyIdCache> {
-private:
-	BlobCipherDomainId domainId;
-	BlobCipherKeyIdCacheMap keyIdCache;
-	BlobCipherBaseKeyId latestBaseCipherKeyId;
-
 public:
 	BlobCipherKeyIdCache();
 	explicit BlobCipherKeyIdCache(BlobCipherDomainId dId);
@@ -188,16 +213,16 @@ public:
 	void cleanup();
 	// API returns list of all 'cached' cipherKeys
 	std::vector<Reference<BlobCipherKey>> getAllCipherKeys();
+
+private:
+	BlobCipherDomainId domainId;
+	BlobCipherKeyIdCacheMap keyIdCache;
+	BlobCipherBaseKeyId latestBaseCipherKeyId;
 };
 
 using BlobCipherDomainCacheMap = std::unordered_map<BlobCipherDomainId, Reference<BlobCipherKeyIdCache>>;
 
 class BlobCipherKeyCache : NonCopyable {
-	BlobCipherDomainCacheMap domainCacheMap;
-	static constexpr uint64_t CIPHER_KEY_CACHE_TTL_SEC = 10 * 60L;
-
-	BlobCipherKeyCache() {}
-
 public:
 	// Enable clients to insert base encryption cipher details to the BlobCipherKeyCache.
 	// The cipherKeys are indexed using 'baseCipherId', given cipherKeys are immutable,
@@ -226,6 +251,12 @@ public:
 	// Ensures cached encryption key(s) (plaintext) never gets persisted as part
 	// of FDB process/core dump.
 	static void cleanup() noexcept;
+
+private:
+	BlobCipherDomainCacheMap domainCacheMap;
+	static constexpr uint64_t CIPHER_KEY_CACHE_TTL_SEC = 10 * 60L;
+
+	BlobCipherKeyCache() {}
 };
 
 // This interface enables data block encryption. An invocation to encrypt() will
@@ -234,16 +265,20 @@ public:
 // for decryption on reads.
 
 class EncryptBlobCipherAes265Ctr final : NonCopyable, public ReferenceCounted<EncryptBlobCipherAes265Ctr> {
-	EVP_CIPHER_CTX* ctx;
-	Reference<BlobCipherKey> cipherKey;
-	uint8_t iv[AES_256_IV_LENGTH];
-
 public:
 	static constexpr uint8_t ENCRYPT_HEADER_VERSION = 1;
 
 	EncryptBlobCipherAes265Ctr(Reference<BlobCipherKey> key, const uint8_t* iv, const int ivLen);
 	~EncryptBlobCipherAes265Ctr();
-	StringRef encrypt(const uint8_t* plaintext, const int plaintextLen, BlobCipherEncryptHeader* header, Arena&);
+	Reference<EncryptBuf> encrypt(const uint8_t* plaintext,
+	                              const int plaintextLen,
+	                              BlobCipherEncryptHeader* header,
+	                              Arena&);
+
+private:
+	EVP_CIPHER_CTX* ctx;
+	Reference<BlobCipherKey> cipherKey;
+	uint8_t iv[AES_256_IV_LENGTH];
 };
 
 // This interface enable data block decryption. An invocation to decrypt() would
@@ -251,30 +286,32 @@ public:
 // supply BlobCipherEncryptHeader.
 
 class DecryptBlobCipherAes256Ctr final : NonCopyable, public ReferenceCounted<DecryptBlobCipherAes256Ctr> {
+public:
+	DecryptBlobCipherAes256Ctr(Reference<BlobCipherKey> key, const uint8_t* iv);
+	~DecryptBlobCipherAes256Ctr();
+	Reference<EncryptBuf> decrypt(const uint8_t* ciphertext,
+	                              const int ciphertextLen,
+	                              const BlobCipherEncryptHeader& header,
+	                              Arena&);
+
+private:
 	EVP_CIPHER_CTX* ctx;
 
 	void verifyEncryptBlobHeader(const uint8_t* cipherText,
 	                             const int ciphertextLen,
 	                             const BlobCipherEncryptHeader& header,
 	                             Arena& arena);
-
-public:
-	DecryptBlobCipherAes256Ctr(Reference<BlobCipherKey> key, const uint8_t* iv);
-	~DecryptBlobCipherAes256Ctr();
-	StringRef decrypt(const uint8_t* ciphertext,
-	                  const int ciphertextLen,
-	                  const BlobCipherEncryptHeader& header,
-	                  Arena&);
 };
 
 class HmacSha256DigestGen final : NonCopyable {
-	HMAC_CTX* ctx;
-
 public:
 	HmacSha256DigestGen(const unsigned char* key, size_t len);
 	~HmacSha256DigestGen();
 	HMAC_CTX* getCtx() const { return ctx; }
 	StringRef digest(unsigned char const* data, size_t len, Arena&);
+
+private:
+	HMAC_CTX* ctx;
 };
 
 BlobCipherChecksum computeEncryptChecksum(const uint8_t* payload,
@@ -282,4 +319,4 @@ BlobCipherChecksum computeEncryptChecksum(const uint8_t* payload,
                                           const BlobCipherRandomSalt& salt,
                                           Arena& arena);
 
-//#endif // ENCRYPTION_ENABLED
+#endif // ENCRYPTION_ENABLED

@@ -24,14 +24,15 @@
 #include "flow/BlobCipher.h"
 #include "fdbserver/workloads/workloads.actor.h"
 #include "flow/Trace.h"
-#include "flow/actorcompiler.h" // This must be the last #include.
-
-//#if ENCRYPTION_ENABLED
 
 #include <chrono>
 #include <cstring>
 #include <memory>
 #include <random>
+
+#include "flow/actorcompiler.h" // This must be the last #include.
+
+#if ENCRYPTION_ENABLED
 
 #define MEGA_BYTES (1024 * 1024)
 #define NANO_SECOND (1000 * 1000 * 1000)
@@ -79,6 +80,31 @@ struct WorkloadMetrics {
 	}
 };
 
+// Workload generator for encryption/decryption operations.
+// 1. For every client run, it generate unique random encryptionDomainId range and simulate encryption of
+//    either fixed size or variable size payload.
+// 2. For each encryption run, it would interact with BlobCipherKeyCache to fetch the desired encryption key
+//    with then is used for encryption the plaintext payload.
+// 3. Operation generates 'encryption header' which is then leveraged to decrypt the ciphertext obtained from
+//    step#2.
+//
+// Correctness validations:
+// -----------------------
+// Correctness invariants are validated at various steps such as:
+// 1. Encryption key correctness: as part of performing decryption, BlobCipherKeyCache is lookedup to procure
+//    desired encrytion key based on: {encryptionDomainId, baseCipherId}; the obtained key is validated against
+//    the encryption key used for encryption the data.
+// 2. After encryption, generated 'encryption header' fields are validated, encrypted buffer size and contents are
+//    validated.
+// 3. After decryption, the obtained deciphertext is validated against the orginal plaintext payload.
+//
+// Performance metrics:
+// -------------------
+// The workload generator profiles below operations across the iterations and logs the details at the end, they are:
+// 1. Time spent in encryption key fetch (and derivation) operations.
+// 2. Time spent encrypting the buffer (doesn't incude key lookup time); also records the throughput in MB/sec.
+// 3. Time spent decrypting the buffer (doesn't incude key lookup time); also records the throughput in MB/sec.
+
 struct EncryptionOpsWorkload : TestWorkload {
 	int mode;
 	int64_t numIterations;
@@ -102,6 +128,7 @@ struct EncryptionOpsWorkload : TestWorkload {
 		buff = std::make_unique<uint8_t[]>(maxBufSize);
 		validationBuff = std::make_unique<uint8_t[]>(maxBufSize);
 
+		// assign unique encryptionDomainId range per workload clients
 		minDomainId = wcx.clientId * 100 + mode * 30 + 1;
 		maxDomainId = deterministicRandom()->randomInt(minDomainId, minDomainId + 10) + 5;
 		minBaseCipherId = 100;
@@ -173,26 +200,29 @@ struct EncryptionOpsWorkload : TestWorkload {
 		TraceEvent("UpdateBaseCipher").detail("DomainId", encryptDomainId).detail("BaseCipherId", *nextBaseCipherId);
 	}
 
-	StringRef doEncryption(Reference<BlobCipherKey> key, uint8_t* payload, int len, BlobCipherEncryptHeader* header) {
+	Reference<EncryptBuf> doEncryption(Reference<BlobCipherKey> key,
+	                                   uint8_t* payload,
+	                                   int len,
+	                                   BlobCipherEncryptHeader* header) {
 		uint8_t iv[AES_256_IV_LENGTH];
 		generateRandomData(&iv[0], AES_256_IV_LENGTH);
 		EncryptBlobCipherAes265Ctr encryptor(key, &iv[0], AES_256_IV_LENGTH);
 
 		auto start = std::chrono::high_resolution_clock::now();
-		auto encrypted = encryptor.encrypt(buff.get(), len, header, arena);
+		Reference<EncryptBuf> encrypted = encryptor.encrypt(payload, len, header, arena);
 		auto end = std::chrono::high_resolution_clock::now();
 
 		// validate encrypted buffer size and contents (not matching with plaintext)
-		ASSERT(encrypted.size() == len);
-		std::copy(encrypted.begin(), encrypted.end(), validationBuff.get());
-		ASSERT(memcmp(validationBuff.get(), buff.get(), len) != 0);
+		ASSERT(encrypted->getLogicalSize() == len);
+		memcpy(validationBuff.get(), encrypted->begin(), encrypted->getLogicalSize());
+		ASSERT(memcmp(validationBuff.get(), payload, len) != 0);
 		ASSERT(header->flags.headerVersion == EncryptBlobCipherAes265Ctr::ENCRYPT_HEADER_VERSION);
 
 		metrics->updateEncryptionTime(std::chrono::duration<double, std::nano>(end - start).count());
 		return encrypted;
 	}
 
-	void doDecryption(StringRef encrypted,
+	void doDecryption(Reference<EncryptBuf> encrypted,
 	                  int len,
 	                  const BlobCipherEncryptHeader& header,
 	                  uint8_t* originalPayload,
@@ -209,12 +239,12 @@ struct EncryptionOpsWorkload : TestWorkload {
 		DecryptBlobCipherAes256Ctr decryptor(cipherKey, &header.iv[0]);
 
 		auto start = std::chrono::high_resolution_clock::now();
-		Standalone<StringRef> decrypted = decryptor.decrypt(encrypted.begin(), len, header, arena);
+		Reference<EncryptBuf> decrypted = decryptor.decrypt(encrypted->begin(), len, header, arena);
 		auto end = std::chrono::high_resolution_clock::now();
 
 		// validate decrypted buffer size and contents (matching with original plaintext)
-		ASSERT(decrypted.size() == len);
-		std::copy(decrypted.begin(), decrypted.end(), validationBuff);
+		ASSERT(decrypted->getLogicalSize() == len);
+		memcpy(validationBuff, decrypted->begin(), decrypted->getLogicalSize());
 		ASSERT(memcmp(validationBuff, originalPayload, len) == 0);
 
 		metrics->updateDecryptionTime(std::chrono::duration<double, std::nano>(end - start).count());
@@ -267,7 +297,7 @@ struct EncryptionOpsWorkload : TestWorkload {
 				// Encrypt the payload - generates BlobCipherEncryptHeader to assist decryption later
 				BlobCipherEncryptHeader header;
 				try {
-					auto encrypted = doEncryption(cipherKey, buff.get(), dataLen, &header);
+					Reference<EncryptBuf> encrypted = doEncryption(cipherKey, buff.get(), dataLen, &header);
 
 					// Decrypt the payload - parses the BlobCipherEncryptHeader, fetch corresponding cipherKey and
 					// decrypt
@@ -299,4 +329,4 @@ struct EncryptionOpsWorkload : TestWorkload {
 
 WorkloadFactory<EncryptionOpsWorkload> EncryptionOpsWorkloadFactory("EncryptionOps");
 
-//#endif // ENCRYPTION_ENABLED
+#endif // ENCRYPTION_ENABLED
