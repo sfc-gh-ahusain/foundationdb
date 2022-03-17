@@ -51,15 +51,14 @@
 using BlobCipherDomainId = uint64_t;
 using BlobCipherRandomSalt = uint64_t;
 using BlobCipherBaseKeyId = uint64_t;
-using BlobCipherIV = std::array<unsigned char, AES_256_IV_LENGTH>;
-using BlobCipherChecksum = XXH64_hash_t;
+using BlobCipherChecksum = uint64_t;
 
 typedef enum { BLOB_CIPHER_ENCRYPT_MODE_NONE = 0, BLOB_CIPHER_ENCRYPT_MODE_AES_256_CTR = 1 } BlockCipherEncryptMode;
 
 // BlobCipher Encryption header format
 // The header is persisted as 'plaintext' for encrypted block containing
 // sufficient information for encryption key regeneration to assit decryption on
-// reads. The total space overhead is 40 bytes.
+// reads. The total space overhead is 56 bytes.
 
 #pragma pack(push, 1) // exact fit - no padding
 typedef struct BlobCipherEncryptHeader {
@@ -73,10 +72,17 @@ typedef struct BlobCipherEncryptHeader {
 		} flags;
 		uint64_t _padding{};
 	};
+	// Encyrption domain boundary identifier.
 	BlobCipherDomainId encryptDomainId{};
+	// BaseCipher encryption key identifier
 	BlobCipherBaseKeyId baseCipherId{};
+	// Random salt
 	BlobCipherRandomSalt salt{};
-	BlobCipherChecksum checksum{};
+	// Checksum tracking checksum of the encrypted buffer.
+	// Approach protects against 'tampering' of ciphertext as well 'bit rots/flips'.
+	BlobCipherChecksum ciphertextChecksum{};
+	// Initialization vector used to encrypt the payload.
+	uint8_t iv[AES_256_IV_LENGTH];
 
 	BlobCipherEncryptHeader();
 } BlobCipherEncryptHeader;
@@ -230,13 +236,14 @@ public:
 class EncryptBlobCipherAes265Ctr final : NonCopyable, public ReferenceCounted<EncryptBlobCipherAes265Ctr> {
 	EVP_CIPHER_CTX* ctx;
 	Reference<BlobCipherKey> cipherKey;
+	uint8_t iv[AES_256_IV_LENGTH];
 
 public:
 	static constexpr uint8_t ENCRYPT_HEADER_VERSION = 1;
 
-	EncryptBlobCipherAes265Ctr(Reference<BlobCipherKey> key, const BlobCipherIV& iv);
+	EncryptBlobCipherAes265Ctr(Reference<BlobCipherKey> key, const uint8_t* iv, const int ivLen);
 	~EncryptBlobCipherAes265Ctr();
-	StringRef encrypt(unsigned char const* plaintext, const int plaintextLen, BlobCipherEncryptHeader* header, Arena&);
+	StringRef encrypt(const uint8_t* plaintext, const int plaintextLen, BlobCipherEncryptHeader* header, Arena&);
 };
 
 // This interface enable data block decryption. An invocation to decrypt() would
@@ -246,15 +253,15 @@ public:
 class DecryptBlobCipherAes256Ctr final : NonCopyable, public ReferenceCounted<DecryptBlobCipherAes256Ctr> {
 	EVP_CIPHER_CTX* ctx;
 
-	void verifyEncryptBlobHeader(unsigned char const* cipherText,
+	void verifyEncryptBlobHeader(const uint8_t* cipherText,
 	                             const int ciphertextLen,
 	                             const BlobCipherEncryptHeader& header,
 	                             Arena& arena);
 
 public:
-	DecryptBlobCipherAes256Ctr(Reference<BlobCipherKey> key, const BlobCipherIV& iv);
+	DecryptBlobCipherAes256Ctr(Reference<BlobCipherKey> key, const uint8_t* iv);
 	~DecryptBlobCipherAes256Ctr();
-	StringRef decrypt(unsigned char const* ciphertext,
+	StringRef decrypt(const uint8_t* ciphertext,
 	                  const int ciphertextLen,
 	                  const BlobCipherEncryptHeader& header,
 	                  Arena&);
@@ -270,7 +277,7 @@ public:
 	StringRef digest(unsigned char const* data, size_t len, Arena&);
 };
 
-BlobCipherChecksum computeEncryptChecksum(unsigned char const* payload,
+BlobCipherChecksum computeEncryptChecksum(const uint8_t* payload,
                                           const int payloadLen,
                                           const BlobCipherRandomSalt& salt,
                                           Arena& arena);

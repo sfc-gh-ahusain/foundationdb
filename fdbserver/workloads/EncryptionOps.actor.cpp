@@ -87,8 +87,6 @@ struct EncryptionOpsWorkload : TestWorkload {
 	std::unique_ptr<uint8_t[]> buff;
 	std::unique_ptr<uint8_t[]> validationBuff;
 
-	BlobCipherIV iv;
-	std::unique_ptr<uint8_t[]> parentCipher;
 	Arena arena;
 	std::unique_ptr<WorkloadMetrics> metrics;
 
@@ -104,10 +102,6 @@ struct EncryptionOpsWorkload : TestWorkload {
 		buff = std::make_unique<uint8_t[]>(maxBufSize);
 		validationBuff = std::make_unique<uint8_t[]>(maxBufSize);
 
-		iv = getRandomIV();
-		parentCipher = std::make_unique<uint8_t[]>(AES_256_KEY_LENGTH);
-		generateRandomData(parentCipher.get(), AES_256_KEY_LENGTH);
-
 		minDomainId = wcx.clientId * 100 + mode * 30 + 1;
 		maxDomainId = deterministicRandom()->randomInt(minDomainId, minDomainId + 10) + 5;
 		minBaseCipherId = 100;
@@ -121,11 +115,6 @@ struct EncryptionOpsWorkload : TestWorkload {
 
 	bool isFixedSizePayload() { return mode == 1; }
 
-	BlobCipherIV getRandomIV() {
-		generateRandomData(iv.data(), iv.size());
-		return iv;
-	}
-
 	std::string getModeStr() const {
 		if (mode == 1) {
 			return "FixedSize";
@@ -134,23 +123,6 @@ struct EncryptionOpsWorkload : TestWorkload {
 		}
 		// no other mode supported
 		throw internal_error();
-	}
-
-	StringRef doEncryption(Reference<BlobCipherKey> key, uint8_t* payload, int len, BlobCipherEncryptHeader* header) {
-		EncryptBlobCipherAes265Ctr encryptor(key, iv);
-
-		auto start = std::chrono::high_resolution_clock::now();
-		auto encrypted = encryptor.encrypt(buff.get(), len, header, arena);
-		auto end = std::chrono::high_resolution_clock::now();
-
-		// validate encrypted buffer size and contents (not matching with plaintext)
-		ASSERT(encrypted.size() == len);
-		std::copy(encrypted.begin(), encrypted.end(), validationBuff.get());
-		ASSERT(memcmp(validationBuff.get(), buff.get(), len) != 0);
-		ASSERT(header->flags.headerVersion == EncryptBlobCipherAes265Ctr::ENCRYPT_HEADER_VERSION);
-
-		metrics->updateEncryptionTime(std::chrono::duration<double, std::nano>(end - start).count());
-		return encrypted;
 	}
 
 	void generateRandomBaseCipher(const int maxLen, uint8_t* buff, int* retLen) {
@@ -201,6 +173,25 @@ struct EncryptionOpsWorkload : TestWorkload {
 		TraceEvent("UpdateBaseCipher").detail("DomainId", encryptDomainId).detail("BaseCipherId", *nextBaseCipherId);
 	}
 
+	StringRef doEncryption(Reference<BlobCipherKey> key, uint8_t* payload, int len, BlobCipherEncryptHeader* header) {
+		uint8_t iv[AES_256_IV_LENGTH];
+		generateRandomData(&iv[0], AES_256_IV_LENGTH);
+		EncryptBlobCipherAes265Ctr encryptor(key, &iv[0], AES_256_IV_LENGTH);
+
+		auto start = std::chrono::high_resolution_clock::now();
+		auto encrypted = encryptor.encrypt(buff.get(), len, header, arena);
+		auto end = std::chrono::high_resolution_clock::now();
+
+		// validate encrypted buffer size and contents (not matching with plaintext)
+		ASSERT(encrypted.size() == len);
+		std::copy(encrypted.begin(), encrypted.end(), validationBuff.get());
+		ASSERT(memcmp(validationBuff.get(), buff.get(), len) != 0);
+		ASSERT(header->flags.headerVersion == EncryptBlobCipherAes265Ctr::ENCRYPT_HEADER_VERSION);
+
+		metrics->updateEncryptionTime(std::chrono::duration<double, std::nano>(end - start).count());
+		return encrypted;
+	}
+
 	void doDecryption(StringRef encrypted,
 	                  int len,
 	                  const BlobCipherEncryptHeader& header,
@@ -215,7 +206,7 @@ struct EncryptionOpsWorkload : TestWorkload {
 		ASSERT(cipherKey.isValid());
 		ASSERT(cipherKey->isEqual(orgCipherKey));
 
-		DecryptBlobCipherAes256Ctr decryptor(cipherKey, iv);
+		DecryptBlobCipherAes256Ctr decryptor(cipherKey, &header.iv[0]);
 
 		auto start = std::chrono::high_resolution_clock::now();
 		Standalone<StringRef> decrypted = decryptor.decrypt(encrypted.begin(), len, header, arena);

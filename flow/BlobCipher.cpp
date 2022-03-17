@@ -257,26 +257,30 @@ std::vector<Reference<BlobCipherKey>> BlobCipherKeyCache::getAllCiphers(const Bl
 
 // EncryptBlobCipher class methods
 
-EncryptBlobCipherAes265Ctr::EncryptBlobCipherAes265Ctr(Reference<BlobCipherKey> key, const BlobCipherIV& iv)
+EncryptBlobCipherAes265Ctr::EncryptBlobCipherAes265Ctr(Reference<BlobCipherKey> key,
+                                                       const uint8_t* cipherIV,
+                                                       const int ivLen)
   : ctx(EVP_CIPHER_CTX_new()), cipherKey(key) {
+	ASSERT(ivLen == AES_256_IV_LENGTH);
+	memcpy(&iv[0], cipherIV, ivLen);
 	if (ctx == nullptr) {
 		throw encrypt_ops_error();
 	}
 	if (EVP_EncryptInit_ex(ctx, EVP_aes_256_ctr(), nullptr, nullptr, nullptr) != 1) {
 		throw encrypt_ops_error();
 	}
-	if (EVP_EncryptInit_ex(ctx, nullptr, nullptr, key.getPtr()->data(), iv.data()) != 1) {
+	if (EVP_EncryptInit_ex(ctx, nullptr, nullptr, key.getPtr()->data(), cipherIV) != 1) {
 		throw encrypt_ops_error();
 	}
 }
 
-StringRef EncryptBlobCipherAes265Ctr::encrypt(unsigned char const* plaintext,
+StringRef EncryptBlobCipherAes265Ctr::encrypt(const uint8_t* plaintext,
                                               const int plaintextLen,
                                               BlobCipherEncryptHeader* header,
                                               Arena& arena) {
 	TEST(true); // Encrypting data with BlobCipher
 
-	auto ciphertext = new (arena) unsigned char[plaintextLen + AES_BLOCK_SIZE];
+	auto ciphertext = new (arena) uint8_t[plaintextLen + AES_BLOCK_SIZE];
 	int bytes{ 0 };
 	if (EVP_EncryptUpdate(ctx, ciphertext, &bytes, plaintext, plaintextLen) != 1) {
 		TraceEvent("Encrypt_UpdateFailed")
@@ -307,13 +311,14 @@ StringRef EncryptBlobCipherAes265Ctr::encrypt(unsigned char const* plaintext,
 	header->baseCipherId = cipherKey->getBaseCipherId();
 	header->encryptDomainId = cipherKey->getDomainId();
 	header->salt = cipherKey->getSalt();
+	memcpy(&header->iv[0], &iv[0], AES_256_IV_LENGTH);
 
 	// Preserve checksum of encrypted bytes in the header; approach protects against disk induced bit-rot/flip
 	// scenarios. AES CTR mode doesn't generate 'tag' by default as with schemes such as: AES 256 GCM.
 
-	header->checksum = computeEncryptChecksum(ciphertext, bytes + finalBytes, cipherKey->getSalt(), arena);
+	header->ciphertextChecksum = computeEncryptChecksum(ciphertext, bytes + finalBytes, cipherKey->getSalt(), arena);
 
-	return StringRef(ciphertext, bytes + finalBytes);
+	return StringRef(arena, ciphertext, bytes + finalBytes);
 }
 
 EncryptBlobCipherAes265Ctr::~EncryptBlobCipherAes265Ctr() {
@@ -324,7 +329,7 @@ EncryptBlobCipherAes265Ctr::~EncryptBlobCipherAes265Ctr() {
 
 // DecryptBlobCipher class methods
 
-DecryptBlobCipherAes256Ctr::DecryptBlobCipherAes256Ctr(Reference<BlobCipherKey> key, const BlobCipherIV& iv)
+DecryptBlobCipherAes256Ctr::DecryptBlobCipherAes256Ctr(Reference<BlobCipherKey> key, const uint8_t* iv)
   : ctx(EVP_CIPHER_CTX_new()) {
 	if (ctx == nullptr) {
 		throw encrypt_ops_error();
@@ -332,12 +337,12 @@ DecryptBlobCipherAes256Ctr::DecryptBlobCipherAes256Ctr(Reference<BlobCipherKey> 
 	if (!EVP_DecryptInit_ex(ctx, EVP_aes_256_ctr(), nullptr, nullptr, nullptr)) {
 		throw encrypt_ops_error();
 	}
-	if (!EVP_DecryptInit_ex(ctx, nullptr, nullptr, key.getPtr()->data(), iv.data())) {
+	if (!EVP_DecryptInit_ex(ctx, nullptr, nullptr, key.getPtr()->data(), iv)) {
 		throw encrypt_ops_error();
 	}
 }
 
-void DecryptBlobCipherAes256Ctr::verifyEncryptBlobHeader(unsigned char const* ciphertext,
+void DecryptBlobCipherAes256Ctr::verifyEncryptBlobHeader(const uint8_t* ciphertext,
                                                          const int ciphertextLen,
                                                          const BlobCipherEncryptHeader& header,
                                                          Arena& arena) {
@@ -353,19 +358,18 @@ void DecryptBlobCipherAes256Ctr::verifyEncryptBlobHeader(unsigned char const* ci
 	}
 
 	// encrypted byte checksum sanity; protection against data bit-rot/flip.
-	BlobCipherChecksum computed = computeEncryptChecksum(
-	    ciphertext, ciphertextLen, header.salt, arena); // XXH3_64bits(ciphertext, ciphertextLen);
-	if (computed != header.checksum) {
+	BlobCipherChecksum computed = computeEncryptChecksum(ciphertext, ciphertextLen, header.salt, arena);
+	if (computed != header.ciphertextChecksum) {
 		TraceEvent("VerifyEncryptBlobHeader_ChecksumMismatch")
 		    .detail("HeaderVersion", header.flags.headerVersion)
 		    .detail("HeaderMode", header.flags.encryptMode)
-		    .detail("Checksum", header.checksum)
-		    .detail("ComputedChecksum", computed);
+		    .detail("CiphertextChecksum", header.ciphertextChecksum)
+		    .detail("ComputedCiphertextChecksum", computed);
 		throw encrypt_header_checksum_mismatch();
 	}
 }
 
-StringRef DecryptBlobCipherAes256Ctr::decrypt(unsigned char const* ciphertext,
+StringRef DecryptBlobCipherAes256Ctr::decrypt(const uint8_t* ciphertext,
                                               const int ciphertextLen,
                                               const BlobCipherEncryptHeader& header,
                                               Arena& arena) {
@@ -373,7 +377,7 @@ StringRef DecryptBlobCipherAes256Ctr::decrypt(unsigned char const* ciphertext,
 
 	verifyEncryptBlobHeader(ciphertext, ciphertextLen, header, arena);
 
-	auto plaintext = new (arena) unsigned char[ciphertextLen + AES_BLOCK_SIZE];
+	auto plaintext = new (arena) uint8_t[ciphertextLen + AES_BLOCK_SIZE];
 	int bytesDecrypted{ 0 };
 	if (!EVP_DecryptUpdate(ctx, plaintext, &bytesDecrypted, ciphertext, ciphertextLen)) {
 		TraceEvent("Decrypt_UpdateFailed")
@@ -388,7 +392,7 @@ StringRef DecryptBlobCipherAes256Ctr::decrypt(unsigned char const* ciphertext,
 		    .detail("EncryptDomainId", header.encryptDomainId);
 		throw encrypt_ops_error();
 	}
-	return StringRef(plaintext, bytesDecrypted + finalBlobBytes);
+	return StringRef(arena, plaintext, bytesDecrypted + finalBlobBytes);
 }
 
 DecryptBlobCipherAes256Ctr::~DecryptBlobCipherAes256Ctr() {
@@ -536,11 +540,11 @@ TEST_CASE("flow/BlobCipher") {
 	generateRandomData(&orgData[0], bufLen);
 
 	Arena arena;
-	BlobCipherIV iv;
-	generateRandomData(iv.data(), iv.size());
+	uint8_t iv[AES_256_IV_LENGTH];
+	generateRandomData(&iv[0], AES_256_IV_LENGTH);
 
 	// validate basic encrypt followed by decrypt operation
-	EncryptBlobCipherAes265Ctr encryptor(cipherKey, iv);
+	EncryptBlobCipherAes265Ctr encryptor(cipherKey, iv, AES_256_IV_LENGTH);
 	BlobCipherEncryptHeader header;
 	auto encrypted = encryptor.encrypt(&orgData[0], bufLen, &header, arena);
 	std::copy(encrypted.begin(), encrypted.end(), encryptedData);
@@ -555,11 +559,11 @@ TEST_CASE("flow/BlobCipher") {
 	    .detail("HeaderEncryptMode", header.flags.encryptMode)
 	    .detail("DomainId", header.encryptDomainId)
 	    .detail("BaseCipherId", header.baseCipherId)
-	    .detail("HeaderChecksum", header.checksum);
+	    .detail("HeaderChecksum", header.ciphertextChecksum);
 
 	Reference<BlobCipherKey> encyrptKey = cipherKeyCache.getCipherKey(header.encryptDomainId, header.baseCipherId);
 	ASSERT(encyrptKey->isEqual(cipherKey));
-	DecryptBlobCipherAes256Ctr decryptor(encyrptKey, iv);
+	DecryptBlobCipherAes256Ctr decryptor(encyrptKey, &header.iv[0]);
 	uint8_t decryptedData[bufLen];
 	auto decrypted = decryptor.decrypt(&encryptedData[0], bufLen, header, arena);
 
@@ -592,14 +596,14 @@ TEST_CASE("flow/BlobCipher") {
 	}
 
 	// induce encyrption header corruption - checksum mismatch
-	header.checksum += 1;
+	header.ciphertextChecksum += 1;
 	try {
 		decrypted = decryptor.decrypt(&encryptedData[0], bufLen, header, arena);
 	} catch (Error& e) {
 		if (e.code() != error_code_encrypt_header_checksum_mismatch) {
 			throw;
 		}
-		header.checksum -= 1;
+		header.ciphertextChecksum -= 1;
 	}
 
 	// Validate dropping encyrptDomainId cached keys
@@ -619,22 +623,20 @@ TEST_CASE("flow/BlobCipher") {
 	return Void();
 }
 
-BlobCipherChecksum computeEncryptChecksum(unsigned char const* payload,
+BlobCipherChecksum computeEncryptChecksum(const uint8_t* payload,
                                           const int payloadLen,
                                           const BlobCipherRandomSalt& salt,
                                           Arena& arena) {
 	// FIPS compliance recommendation is to leverage cryptographic digest mechanism to generate checksum
 	// Leverage HMAC_SHA256 using header.randomSalt as the initialization 'key' for the hmac digest.
-	/*
-	    HmacSha256DigestGen hmacGenerator((const unsigned char*)&salt, sizeof(salt));
-	    StringRef digest = hmacGenerator.digest(payload, payloadLen, arena);
-	    ASSERT(digest.size() >= sizeof(BlobCipherChecksum));
 
-	    BlobCipherChecksum checksum;
-	    memcpy((uint8_t*)&checksum, digest.begin(), sizeof(BlobCipherChecksum));
-	    return checksum;
-	*/
-	return XXH3_64bits(payload, payloadLen);
+	HmacSha256DigestGen hmacGenerator((const uint8_t*)&salt, sizeof(salt));
+	StringRef digest = hmacGenerator.digest(payload, payloadLen, arena);
+	ASSERT(digest.size() >= sizeof(BlobCipherChecksum));
+
+	BlobCipherChecksum checksum;
+	memcpy((uint8_t*)&checksum, digest.begin(), sizeof(BlobCipherChecksum));
+	return checksum;
 }
 
 //#endif // ENCRYPTION_ENABLED
