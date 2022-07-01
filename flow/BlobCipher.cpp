@@ -20,6 +20,7 @@
 
 #include "flow/BlobCipher.h"
 
+#include "flow/Arena.h"
 #include "flow/EncryptUtils.h"
 #include "flow/Knobs.h"
 #include "flow/Error.h"
@@ -62,6 +63,10 @@ BlobCipherKey::BlobCipherKey(const EncryptCipherDomainId& domainId,
                              int baseCiphLen,
                              const EncryptCipherRandomSalt& salt) {
 	initKey(domainId, baseCiph, baseCiphLen, baseCiphId, salt);
+}
+
+BlobCipherKey::BlobCipherKey(const BlobCipherDetails& details, StringRef baseCipherRef) {
+	initKey(details.encryptDomainId, baseCipherRef.begin(), baseCipherRef.size(), details.baseCipherId, details.salt);
 }
 
 void BlobCipherKey::initKey(const EncryptCipherDomainId& domainId,
@@ -501,6 +506,76 @@ Reference<EncryptBuf> EncryptBlobCipherAes265Ctr::encrypt(const uint8_t* plainte
 	return encryptBuf;
 }
 
+Standalone<StringRef> EncryptBlobCipherAes265Ctr::encryptBlobGranuleChunk(const uint8_t* plaintext,
+                                                                          const int plaintextLen) {
+	Standalone<StringRef> encrypted = makeString(plaintextLen);
+	uint8_t* ciphertext = mutateString(encrypted);
+	int bytes{ 0 };
+
+	if (EVP_EncryptUpdate(ctx, ciphertext, &bytes, plaintext, plaintextLen) != 1) {
+		TraceEvent("Encrypt_UpdateFailed")
+		    .detail("BaseCipherId", textCipherKey->getBaseCipherId())
+		    .detail("EncryptDomainId", textCipherKey->getDomainId());
+		throw encrypt_ops_error();
+	}
+	int finalBytes{ 0 };
+	if (EVP_EncryptFinal_ex(ctx, ciphertext + bytes, &finalBytes) != 1) {
+		TraceEvent("Encrypt_FinalFailed")
+		    .detail("BaseCipherId", textCipherKey->getBaseCipherId())
+		    .detail("EncryptDomainId", textCipherKey->getDomainId());
+		throw encrypt_ops_error();
+	}
+	if ((bytes + finalBytes) != plaintextLen) {
+		TraceEvent("Encrypt_UnexpectedCipherLen")
+		    .detail("PlaintextLen", plaintextLen)
+		    .detail("EncryptedBufLen", bytes + finalBytes);
+		throw encrypt_ops_error();
+	}
+	return encrypted;
+}
+
+Standalone<StringRef> EncryptBlobCipherAes265Ctr::generateBlobFileEncryptionHeader(StringRef ciphertext) {
+	Arena arena;
+
+	// Ensure 'MultiToken' authentication mode
+	ASSERT(authTokenMode == ENCRYPT_HEADER_AUTH_TOKEN_MODE_MULTI);
+
+	Standalone<StringRef> headerRef = makeString(sizeof(BlobCipherEncryptHeader));
+	BlobCipherEncryptHeader* header = reinterpret_cast<BlobCipherEncryptHeader*>(mutateString(headerRef));
+
+	// Populate encryption header flags details
+	header->flags.size = sizeof(BlobCipherEncryptHeader);
+	header->flags.headerVersion = EncryptBlobCipherAes265Ctr::ENCRYPT_HEADER_VERSION;
+	header->flags.encryptMode = ENCRYPT_CIPHER_MODE_AES_256_CTR;
+	header->flags.authTokenMode = authTokenMode;
+
+	// Populate cipherText encryption-key details
+	header->cipherTextDetails.baseCipherId = textCipherKey->getBaseCipherId();
+	header->cipherTextDetails.encryptDomainId = textCipherKey->getDomainId();
+	header->cipherTextDetails.salt = textCipherKey->getSalt();
+	memcpy(&header->iv[0], &iv[0], AES_256_IV_LENGTH);
+
+	// Populate header encryption-key details
+	header->cipherHeaderDetails.encryptDomainId = headerCipherKey->getDomainId();
+	header->cipherHeaderDetails.baseCipherId = headerCipherKey->getBaseCipherId();
+	header->cipherHeaderDetails.salt = headerCipherKey->getSalt();
+
+	StringRef cipherTextAuthToken = computeAuthToken(ciphertext.begin(),
+	                                                 ciphertext.size(),
+	                                                 reinterpret_cast<const uint8_t*>(&header->cipherTextDetails.salt),
+	                                                 sizeof(EncryptCipherRandomSalt),
+	                                                 arena);
+	memcpy(&header->multiAuthTokens.cipherTextAuthToken[0], cipherTextAuthToken.begin(), AUTH_TOKEN_SIZE);
+	StringRef headerAuthToken = computeAuthToken(reinterpret_cast<const uint8_t*>(&header),
+	                                             sizeof(BlobCipherEncryptHeader),
+	                                             headerCipherKey->rawCipher(),
+	                                             AES_256_KEY_LENGTH,
+	                                             arena);
+	memcpy(&header->multiAuthTokens.headerAuthToken[0], headerAuthToken.begin(), AUTH_TOKEN_SIZE);
+
+	return headerRef;
+}
+
 EncryptBlobCipherAes265Ctr::~EncryptBlobCipherAes265Ctr() {
 	if (ctx != nullptr) {
 		EVP_CIPHER_CTX_free(ctx);
@@ -713,7 +788,7 @@ HmacSha256DigestGen::~HmacSha256DigestGen() {
 }
 
 StringRef HmacSha256DigestGen::digest(const unsigned char* data, size_t len, Arena& arena) {
-	TEST(true); // Digest generation
+	// TEST(true); // Digest generation
 	unsigned int digestLen = HMAC_size(ctx);
 	auto digest = new (arena) unsigned char[digestLen];
 	if (HMAC_Update(ctx, data, len) != 1) {

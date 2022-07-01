@@ -39,6 +39,7 @@
 #include "fdbclient/NativeAPI.actor.h"
 #include "fdbclient/Notified.h"
 
+#include "fdbserver/GetEncryptCipherKeys.h"
 #include "fdbserver/Knobs.h"
 #include "fdbserver/BlobGranuleServerCommon.actor.h"
 
@@ -46,6 +47,7 @@
 #include "fdbserver/WaitFailure.h"
 #include "fdbserver/ServerDBInfo.h"
 #include "flow/Arena.h"
+#include "flow/EncryptUtils.h"
 #include "flow/Error.h"
 #include "flow/IRandom.h"
 #include "flow/Trace.h"
@@ -179,6 +181,7 @@ struct BlobWorkerData : NonCopyable, ReferenceCounted<BlobWorkerData> {
 	Reference<BlobConnectionProvider> bstore;
 	KeyRangeMap<GranuleRangeMetadata> granuleMetadata;
 	BGTenantMap tenantData;
+	Reference<AsyncVar<ServerDBInfo> const> dbInfo;
 
 	// contains the history of completed granules before the existing ones. Maps to the latest one, and has
 	// back-pointers to earlier granules
@@ -196,9 +199,9 @@ struct BlobWorkerData : NonCopyable, ReferenceCounted<BlobWorkerData> {
 
 	int changeFeedStreamReplyBufferSize = SERVER_KNOBS->BG_DELTA_FILE_TARGET_BYTES / 2;
 
-	BlobWorkerData(UID id, Reference<AsyncVar<ServerDBInfo> const> dbInfo, Database db)
-	  : id(id), db(db), stats(id, SERVER_KNOBS->WORKER_LOGGING_INTERVAL), tenantData(BGTenantMap(dbInfo)),
-	    initialSnapshotLock(SERVER_KNOBS->BLOB_WORKER_INITIAL_SNAPSHOT_PARALLELISM) {}
+	BlobWorkerData(UID id, Reference<AsyncVar<ServerDBInfo> const> dBInfo, Database db)
+	  : id(id), db(db), stats(id, SERVER_KNOBS->WORKER_LOGGING_INTERVAL), tenantData(BGTenantMap(dBInfo)),
+	    dbInfo(dBInfo), initialSnapshotLock(SERVER_KNOBS->BLOB_WORKER_INITIAL_SNAPSHOT_PARALLELISM) {}
 
 	bool managerEpochOk(int64_t epoch) {
 		if (epoch < currentManagerEpoch) {
@@ -265,6 +268,30 @@ static void checkGranuleLock(int64_t epoch, int64_t seqno, int64_t ownerEpoch, i
 		}
 		throw granule_assignment_conflict();
 	}
+}
+
+ACTOR Future<BlobGranuleCipherKeysCtx> getLatestGranuleCipherKeys(Reference<BlobWorkerData> bwData,
+                                                                  KeyRange keyRange,
+                                                                  Arena* arena) {
+	state BlobGranuleCipherKeysCtx cipherKeysCtx;
+	state Reference<GranuleTenantData> tenantData = bwData->tenantData.getDataForGranule(keyRange);
+
+	std::unordered_map<EncryptCipherDomainId, EncryptCipherDomainName> domains;
+	domains.emplace(tenantData->entry.id, StringRef(*arena, tenantData->name));
+	std::unordered_map<EncryptCipherDomainId, Reference<BlobCipherKey>> domainKeyMap =
+	    wait(getLatestEncryptCipherKeys(bwData->dbInfo, domains));
+
+	auto domainKeyItr = domainKeyMap.find(tenantData->entry.id);
+	ASSERT(domainKeyItr != domainKeyMap.end());
+	cipherKeysCtx.textCipherKey = BlobGranuleCipherKey::fromBlobCipherKey(domainKeyItr->second, *arena);
+
+	TextAndHeaderCipherKeys systemCipherKeys = wait(getLatestSystemEncryptCipherKeys(bwData->dbInfo));
+	cipherKeysCtx.headerCipherKey = BlobGranuleCipherKey::fromBlobCipherKey(systemCipherKeys.cipherHeaderKey, *arena);
+
+	cipherKeysCtx.ivRef = makeString(AES_256_IV_LENGTH, *arena);
+	generateRandomData(mutateString(cipherKeysCtx.ivRef), AES_256_IV_LENGTH);
+
+	return cipherKeysCtx;
 }
 
 ACTOR Future<Void> readAndCheckGranuleLock(Reference<ReadYourWritesTransaction> tr,
@@ -623,7 +650,15 @@ ACTOR Future<BlobFileIndex> writeSnapshot(Reference<BlobWorkerData> bwData,
 		}
 	}
 
-	state Value serialized = serializeChunkedSnapshot(snapshot, SERVER_KNOBS->BG_SNAPSHOT_FILE_TARGET_CHUNKS);
+	state Optional<BlobGranuleCipherKeysCtx> cipherKeysCtx;
+	state Arena arena;
+	if (SERVER_KNOBS->ENABLE_BLOB_FILE_ENCRYPTION) {
+		BlobGranuleCipherKeysCtx ciphKeysCtx = wait(getLatestGranuleCipherKeys(bwData, keyRange, &arena));
+		cipherKeysCtx = ciphKeysCtx;
+	}
+
+	state Value serialized =
+	    serializeChunkedSnapshot(snapshot, SERVER_KNOBS->BG_SNAPSHOT_FILE_TARGET_CHUNKS, cipherKeysCtx);
 	state size_t serializedSize = serialized.size();
 
 	// free snapshot to reduce memory
@@ -814,14 +849,26 @@ ACTOR Future<BlobFileIndex> compactFromBlob(Reference<BlobWorkerData> bwData,
 	state Arena filenameArena;
 	state BlobGranuleChunkRef chunk;
 
+	state Optional<BlobGranuleCipherKeysMeta> cipherKeysMeta;
+	if (SERVER_KNOBS->ENABLE_BLOB_FILE_ENCRYPTION) {
+		BlobGranuleCipherKeysCtx cipherKeysCtx =
+		    wait(getLatestGranuleCipherKeys(bwData, metadata->keyRange, &filenameArena));
+		chunk.cipherKeysCtx = cipherKeysCtx;
+		cipherKeysMeta = chunk.cipherKeysCtx.get().toCipherKeysMeta(filenameArena);
+	}
+
 	state int64_t compactBytesRead = 0;
 	state Version snapshotVersion = files.snapshotFiles.back().version;
 	BlobFileIndex snapshotF = files.snapshotFiles.back();
 
 	ASSERT(snapshotVersion < version);
 
-	chunk.snapshotFile = BlobFilePointerRef(
-	    filenameArena, snapshotF.filename, snapshotF.offset, snapshotF.length, snapshotF.fullFileLength);
+	chunk.snapshotFile = BlobFilePointerRef(filenameArena,
+	                                        snapshotF.filename,
+	                                        snapshotF.offset,
+	                                        snapshotF.length,
+	                                        snapshotF.fullFileLength,
+	                                        cipherKeysMeta);
 	compactBytesRead += snapshotF.length;
 	int deltaIdx = files.deltaFiles.size() - 1;
 	while (deltaIdx >= 0 && files.deltaFiles[deltaIdx].version > snapshotVersion) {
@@ -2223,6 +2270,7 @@ ACTOR Future<Void> doBlobGranuleFileRequest(Reference<BlobWorkerData> bwData, Bl
 	}
 
 	state Optional<Key> tenantPrefix;
+	state Arena arena;
 	if (req.tenantInfo.name.present()) {
 		ASSERT(req.tenantInfo.tenantId != TenantInfo::INVALID_TENANT);
 		Optional<TenantMapEntry> tenantEntry = bwData->tenantData.getTenantById(req.tenantInfo.tenantId);
@@ -2302,10 +2350,17 @@ ACTOR Future<Void> doBlobGranuleFileRequest(Reference<BlobWorkerData> bwData, Bl
 			}
 			state Reference<GranuleMetadata> metadata = m;
 			state Version granuleBeginVersion = req.beginVersion;
+			state Optional<BlobGranuleCipherKeysCtx> cipherKeysCtx;
 
 			choose {
 				when(wait(metadata->readable.getFuture())) {}
 				when(wait(metadata->cancelled.getFuture())) { throw wrong_shard_server(); }
+			}
+
+			if (SERVER_KNOBS->ENABLE_BLOB_FILE_ENCRYPTION) {
+				BlobGranuleCipherKeysCtx ciphKeysCtx =
+				    wait(getLatestGranuleCipherKeys(bwData, metadata->keyRange, &arena));
+				cipherKeysCtx = ciphKeysCtx;
 			}
 
 			// in case both readable and cancelled are ready, check cancelled
@@ -2459,6 +2514,10 @@ ACTOR Future<Void> doBlobGranuleFileRequest(Reference<BlobWorkerData> bwData, Bl
 			chunk.keyRange = KeyRangeRef(StringRef(rep.arena, chunkRange.begin), StringRef(rep.arena, chunkRange.end));
 			if (tenantPrefix.present()) {
 				chunk.tenantPrefix = Optional<StringRef>(tenantPrefix.get());
+			}
+
+			if (cipherKeysCtx.present()) {
+				chunk.cipherKeysCtx = cipherKeysCtx;
 			}
 
 			int64_t deltaBytes = 0;

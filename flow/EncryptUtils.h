@@ -54,6 +54,8 @@ typedef enum {
 static_assert(EncryptCipherMode::ENCRYPT_CIPHER_MODE_LAST <= std::numeric_limits<uint8_t>::max(),
               "EncryptCipherMode value overflow");
 
+EncryptCipherMode encryptModeFromString(const std::string& modeStr);
+
 // EncryptionHeader authentication modes
 // 1. NONE - No 'authentication token' generation needed for EncryptionHeader i.e. no protection against header OR
 // cipherText 'tampering' and/or bit rot/flip corruptions.

@@ -32,6 +32,7 @@
 #include "flow/FastRef.h"
 #include "flow/flow.h"
 #include "flow/genericactors.actor.h"
+#include "flow/serialize.h"
 
 #if defined(HAVE_WOLFSSL)
 #include <wolfssl/options.h>
@@ -79,6 +80,7 @@ private:
 
 #pragma pack(push, 1) // exact fit - no padding
 struct BlobCipherDetails {
+	constexpr static FileIdentifier file_identifier = 1721113;
 	// Encryption domain boundary identifier.
 	EncryptCipherDomainId encryptDomainId = ENCRYPT_INVALID_DOMAIN_ID;
 	// BaseCipher encryption key identifier
@@ -86,8 +88,19 @@ struct BlobCipherDetails {
 	// Random salt
 	EncryptCipherRandomSalt salt{};
 
+	BlobCipherDetails() {}
+	BlobCipherDetails(const EncryptCipherDomainId& dId,
+	                  const EncryptCipherBaseKeyId& bId,
+	                  const EncryptCipherRandomSalt& random)
+	  : encryptDomainId(dId), baseCipherId(bId), salt(random) {}
+
 	bool operator==(const BlobCipherDetails& o) const {
 		return encryptDomainId == o.encryptDomainId && baseCipherId == o.baseCipherId && salt == o.salt;
+	}
+
+	template <class Ar>
+	void serialize(Ar& ar) {
+		serializer(ar, encryptDomainId, baseCipherId, salt);
 	}
 };
 #pragma pack(pop)
@@ -163,6 +176,10 @@ typedef struct BlobCipherEncryptHeader {
 
 	BlobCipherEncryptHeader() {}
 
+	static BlobCipherEncryptHeader fromStringRef(StringRef headerRef) {
+		return BinaryReader::fromStringRef<BlobCipherEncryptHeader>(headerRef, Unversioned());
+	}
+
 	template <class Ar>
 	void serialize(Ar& ar) {
 		ar.serializeBytes(this, headerSize);
@@ -195,6 +212,7 @@ public:
 	              const uint8_t* baseCiph,
 	              int baseCiphLen,
 	              const EncryptCipherRandomSalt& salt);
+	BlobCipherKey(const BlobCipherDetails& details, StringRef baseCipherRef);
 
 	uint8_t* data() const { return cipher.get(); }
 	uint64_t getCreationTime() const { return creationTime; }
@@ -209,6 +227,10 @@ public:
 		       randomSalt == toCompare->getSalt() && baseCipherLen == toCompare->getBaseCipherLen() &&
 		       memcmp(cipher.get(), toCompare->rawCipher(), AES_256_KEY_LENGTH) == 0 &&
 		       memcmp(baseCipher.get(), toCompare->rawBaseCipher(), baseCipherLen) == 0;
+	}
+	bool isCipherDetailsMatches(const BlobCipherDetails& details) {
+		return encryptDomainId == details.encryptDomainId && baseCipherId == details.baseCipherId &&
+		       randomSalt == details.salt;
 	}
 	void reset();
 
@@ -427,6 +449,9 @@ public:
 	                              const int plaintextLen,
 	                              BlobCipherEncryptHeader* header,
 	                              Arena&);
+	Standalone<StringRef> encryptBlobGranuleChunk(const uint8_t* plaintext, const int plaintextLen);
+
+	Standalone<StringRef> generateBlobFileEncryptionHeader(StringRef ciphertext);
 
 private:
 	EVP_CIPHER_CTX* ctx;

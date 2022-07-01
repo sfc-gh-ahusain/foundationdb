@@ -12,6 +12,8 @@ set(FLOW_SRCS
   BlobCipher.cpp
   CompressedInt.actor.cpp
   CompressedInt.h
+  CompressionUtils.h
+  CompressionUtils.cpp
   Deque.cpp
   Deque.h
   DeterministicRandom.cpp

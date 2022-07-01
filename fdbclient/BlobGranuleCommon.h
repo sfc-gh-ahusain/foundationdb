@@ -20,6 +20,9 @@
 
 #ifndef FDBCLIENT_BLOBGRANULECOMMON_H
 #define FDBCLIENT_BLOBGRANULECOMMON_H
+#include "flow/BlobCipher.h"
+#include "flow/IRandom.h"
+#include "flow/serialize.h"
 #pragma once
 
 #include <sstream>
@@ -48,25 +51,97 @@ struct GranuleDeltas : VectorRef<MutationsAndVersionRef> {
 	}
 };
 
+struct BlobGranuleCipherKeysMeta {
+	BlobCipherDetails textCipherDetails;
+	BlobCipherDetails headerCipherDetails;
+	StringRef ivRef;
+
+	template <class Ar>
+	void serialize(Ar& ar) {
+		serializer(ar, textCipherDetails, headerCipherDetails, ivRef);
+	}
+};
+
+struct BlobGranuleCipherKey {
+	BlobCipherDetails cipherDetails;
+	StringRef baseCipher;
+
+	static BlobGranuleCipherKey fromBlobCipherKey(Reference<BlobCipherKey> keyRef, Arena& arena) {
+		BlobGranuleCipherKey cipherKey;
+
+		cipherKey.cipherDetails.encryptDomainId = keyRef->getDomainId();
+		cipherKey.cipherDetails.baseCipherId = keyRef->getBaseCipherId();
+		cipherKey.cipherDetails.salt = keyRef->getSalt();
+		cipherKey.baseCipher = makeString(keyRef->getBaseCipherLen(), arena);
+		memcpy(mutateString(cipherKey.baseCipher), keyRef->rawBaseCipher(), keyRef->getBaseCipherLen());
+		return cipherKey;
+	}
+
+	template <class Ar>
+	void serialize(Ar& ar) {
+		serializer(ar, cipherDetails, baseCipher);
+	}
+};
+
+struct BlobGranuleCipherKeysCtx {
+	BlobGranuleCipherKey textCipherKey;
+	BlobGranuleCipherKey headerCipherKey;
+	StringRef ivRef;
+
+	BlobGranuleCipherKeysMeta toCipherKeysMeta(Arena& arena) {
+		BlobGranuleCipherKeysMeta cipherKeysMeta;
+
+		cipherKeysMeta.textCipherDetails = textCipherKey.cipherDetails;
+		cipherKeysMeta.headerCipherDetails = headerCipherKey.cipherDetails;
+		cipherKeysMeta.ivRef = makeString(AES_256_IV_LENGTH, arena);
+		generateRandomData(mutateString(cipherKeysMeta.ivRef), AES_256_IV_LENGTH);
+		return cipherKeysMeta;
+	}
+
+	template <class Ar>
+	void serialize(Ar& ar) {
+		serializer(ar, textCipherKey, headerCipherKey, ivRef);
+	}
+};
+
 struct BlobFilePointerRef {
 	constexpr static FileIdentifier file_identifier = 5253554;
 	StringRef filename;
 	int64_t offset;
 	int64_t length;
 	int64_t fullFileLength;
+	Optional<BlobGranuleCipherKeysMeta> cipherKeysMeta;
 
 	BlobFilePointerRef() {}
+
 	BlobFilePointerRef(Arena& to, const std::string& filename, int64_t offset, int64_t length, int64_t fullFileLength)
 	  : filename(to, filename), offset(offset), length(length), fullFileLength(fullFileLength) {}
 
+	BlobFilePointerRef(Arena& to,
+	                   const std::string& filename,
+	                   int64_t offset,
+	                   int64_t length,
+	                   int64_t fullFileLength,
+	                   Optional<BlobGranuleCipherKeysMeta> ciphKeysMeta)
+	  : filename(to, filename), offset(offset), length(length), fullFileLength(fullFileLength),
+	    cipherKeysMeta(ciphKeysMeta) {}
+
 	template <class Ar>
 	void serialize(Ar& ar) {
-		serializer(ar, filename, offset, length, fullFileLength);
+		serializer(ar, filename, offset, length, fullFileLength, cipherKeysMeta);
 	}
 
 	std::string toString() const {
 		std::stringstream ss;
 		ss << filename.toString() << ":" << offset << ":" << length << ":" << fullFileLength;
+		if (cipherKeysMeta.present()) {
+			ss << ":CipherKeysMeta:TextCipher:" << cipherKeysMeta.get().textCipherDetails.encryptDomainId << ":"
+			   << cipherKeysMeta.get().textCipherDetails.baseCipherId << ":"
+			   << cipherKeysMeta.get().textCipherDetails.salt
+			   << ":HeaderCipher:" << cipherKeysMeta.get().headerCipherDetails.encryptDomainId << ":"
+			   << cipherKeysMeta.get().headerCipherDetails.baseCipherId << ":"
+			   << cipherKeysMeta.get().headerCipherDetails.salt;
+		}
 		return std::move(ss).str();
 	}
 };
@@ -84,10 +159,19 @@ struct BlobGranuleChunkRef {
 	VectorRef<BlobFilePointerRef> deltaFiles;
 	GranuleDeltas newDeltas;
 	Optional<KeyRef> tenantPrefix;
+	Optional<BlobGranuleCipherKeysCtx> cipherKeysCtx;
 
 	template <class Ar>
 	void serialize(Ar& ar) {
-		serializer(ar, keyRange, includedVersion, snapshotVersion, snapshotFile, deltaFiles, newDeltas, tenantPrefix);
+		serializer(ar,
+		           keyRange,
+		           includedVersion,
+		           snapshotVersion,
+		           snapshotFile,
+		           deltaFiles,
+		           newDeltas,
+		           tenantPrefix,
+		           cipherKeysCtx);
 	}
 };
 

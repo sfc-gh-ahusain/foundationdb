@@ -25,7 +25,9 @@
 
 #include "fdbclient/BlobGranuleCommon.h"
 
-Value serializeChunkedSnapshot(Standalone<GranuleSnapshot> snapshot, int chunks);
+Value serializeChunkedSnapshot(Standalone<GranuleSnapshot> snapshot,
+                               int chunks,
+                               Optional<BlobGranuleCipherKeysCtx> cipherKeysCtx = Optional<BlobGranuleCipherKeysCtx>());
 
 // FIXME: support sorted and chunked delta files
 

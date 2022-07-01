@@ -53,11 +53,21 @@ struct BlobFileIndex {
 	int64_t offset;
 	int64_t length;
 	int64_t fullFileLength;
+	Optional<BlobGranuleCipherKeysMeta> cipherKeysMeta;
 
 	BlobFileIndex() {}
 
 	BlobFileIndex(Version version, std::string filename, int64_t offset, int64_t length, int64_t fullFileLength)
 	  : version(version), filename(filename), offset(offset), length(length), fullFileLength(fullFileLength) {}
+
+	BlobFileIndex(Version version,
+	              std::string filename,
+	              int64_t offset,
+	              int64_t length,
+	              int64_t fullFileLength,
+	              Optional<BlobGranuleCipherKeysMeta> ciphKeysMeta)
+	  : version(version), filename(filename), offset(offset), length(length), fullFileLength(fullFileLength),
+	    cipherKeysMeta(ciphKeysMeta) {}
 
 	// compare on version
 	bool operator<(const BlobFileIndex& r) const { return version < r.version; }
