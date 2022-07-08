@@ -174,6 +174,11 @@ struct IndexBlockRef {
 		BlobGranuleFileEncryptionKeys eKeys = getEncryptBlobCipherKey(cipherKeysCtx);
 		ASSERT(eKeys.headerCipherKey.isValid() && eKeys.textCipherKey.isValid());
 
+		if (BG_ENCRYPT_COMPRESS_DEBUG) {
+			XXH64_hash_t chksum = XXH3_64bits(buffer.begin(), buffer.size());
+			TraceEvent(SevDebug, "IndexBlockEncrypt_Before").detail("Chksum", chksum);
+		}
+
 		EncryptBlobCipherAes265Ctr encryptor(eKeys.textCipherKey,
 		                                     eKeys.headerCipherKey,
 		                                     cipherKeysCtx.ivRef.begin(),
@@ -184,6 +189,11 @@ struct IndexBlockRef {
 		buffer = encryptor.encrypt(serializedBuff.contents().begin(), serializedBuff.contents().size(), &header, arena)
 		             ->toStringRef();
 		encryptHeaderRef = BlobCipherEncryptHeader::toStringRef(header, arena);
+
+		if (BG_ENCRYPT_COMPRESS_DEBUG) {
+			XXH64_hash_t chksum = XXH3_64bits(buffer.begin(), buffer.size());
+			TraceEvent(SevDebug, "IndexBlockEncrypt_After").detail("Chksum", chksum);
+		}
 	}
 
 	static void decrypt(const BlobGranuleCipherKeysCtx cipherKeysCtx, IndexBlockRef& idxRef, Arena& arena) {
@@ -192,6 +202,11 @@ struct IndexBlockRef {
 		ASSERT(eKeys.headerCipherKey.isValid() && eKeys.textCipherKey.isValid());
 		ASSERT(idxRef.encryptHeaderRef.present());
 
+		if (BG_ENCRYPT_COMPRESS_DEBUG) {
+			XXH64_hash_t chksum = XXH3_64bits(idxRef.buffer.begin(), idxRef.buffer.size());
+			TraceEvent(SevDebug, "IndexBlockEncrypt_Before").detail("Chksum", chksum);
+		}
+
 		BlobCipherEncryptHeader header = BlobCipherEncryptHeader::fromStringRef(idxRef.encryptHeaderRef.get());
 
 		validateEncryptionHeaderDetails(eKeys, header, cipherKeysCtx.ivRef);
@@ -199,6 +214,11 @@ struct IndexBlockRef {
 		DecryptBlobCipherAes256Ctr decryptor(eKeys.textCipherKey, eKeys.headerCipherKey, cipherKeysCtx.ivRef.begin());
 		StringRef decrypted =
 		    decryptor.decrypt(idxRef.buffer.begin(), idxRef.buffer.size(), header, arena)->toStringRef();
+
+		if (BG_ENCRYPT_COMPRESS_DEBUG) {
+			XXH64_hash_t chksum = XXH3_64bits(decrypted.begin(), decrypted.size());
+			TraceEvent(SevDebug, "IndexBlockEncrypt_After").detail("Chksum", chksum);
+		}
 
 		// TODO: Add version?
 		ObjectReader dataReader(decrypted.begin(), Unversioned());
@@ -258,6 +278,11 @@ struct IndexBlobGranuleFileChunkRef {
 
 		ASSERT(eKeys.headerCipherKey.isValid() && eKeys.textCipherKey.isValid());
 
+		if (BG_ENCRYPT_COMPRESS_DEBUG) {
+			XXH64_hash_t chksum = XXH3_64bits(blobChunkRef.buffer.begin(), blobChunkRef.buffer.size());
+			TraceEvent(SevDebug, "BlobChunkEncrypt_Before").detail("Chksum", chksum);
+		}
+
 		EncryptBlobCipherAes265Ctr encryptor(eKeys.textCipherKey,
 		                                     eKeys.headerCipherKey,
 		                                     cipherKeysCtx.ivRef.begin(),
@@ -267,6 +292,11 @@ struct IndexBlobGranuleFileChunkRef {
 		blobChunkRef.buffer =
 		    encryptor.encrypt(blobChunkRef.buffer.begin(), blobChunkRef.buffer.size(), &header, arena)->toStringRef();
 		blobChunkRef.encryptHeaderRef = BlobCipherEncryptHeader::toStringRef(header, arena);
+
+		if (BG_ENCRYPT_COMPRESS_DEBUG) {
+			XXH64_hash_t chksum = XXH3_64bits(blobChunkRef.buffer.begin(), blobChunkRef.buffer.size());
+			TraceEvent(SevDebug, "BlobChunkEncrypt_After").detail("Chksum", chksum);
+		}
 	}
 
 	static Value toBytes(Optional<BlobGranuleCipherKeysCtx> cipherKeysCtx, const Value& chunk, Arena& arena) {
@@ -300,12 +330,25 @@ struct IndexBlobGranuleFileChunkRef {
 		ASSERT(eKeys.headerCipherKey.isValid() && eKeys.textCipherKey.isValid());
 		ASSERT(blobChunkRef.encryptHeaderRef.present());
 
+		if (BG_ENCRYPT_COMPRESS_DEBUG) {
+			XXH64_hash_t chksum = XXH3_64bits(blobChunkRef.buffer.begin(), blobChunkRef.buffer.size());
+			TraceEvent(SevDebug, "BlobChunkDecrypt_Before").detail("Chksum", chksum);
+		}
+
 		BlobCipherEncryptHeader header = BlobCipherEncryptHeader::fromStringRef(blobChunkRef.encryptHeaderRef.get());
 
 		validateEncryptionHeaderDetails(eKeys, header, cipherKeysCtx.ivRef);
 
 		DecryptBlobCipherAes256Ctr decryptor(eKeys.textCipherKey, eKeys.headerCipherKey, cipherKeysCtx.ivRef.begin());
-		return decryptor.decrypt(blobChunkRef.buffer.begin(), blobChunkRef.buffer.size(), header, arena)->toStringRef();
+		StringRef decrypted =
+		    decryptor.decrypt(blobChunkRef.buffer.begin(), blobChunkRef.buffer.size(), header, arena)->toStringRef();
+
+		if (BG_ENCRYPT_COMPRESS_DEBUG) {
+			XXH64_hash_t chksum = XXH3_64bits(decrypted.begin(), decrypted.size());
+			TraceEvent(SevDebug, "BlobChunkDecrypt_After").detail("Chksum", chksum);
+		}
+
+		return decrypted;
 	}
 
 	static IndexBlobGranuleFileChunkRef fromBytes(Optional<BlobGranuleCipherKeysCtx> cipherKeysCtx,
@@ -323,11 +366,14 @@ struct IndexBlobGranuleFileChunkRef {
 		}
 
 		if (chunkRef.compressionFilter.present()) {
+			ASSERT(chunkRef.chunkBytes.present());
 			chunkRef.chunkBytes =
 			    CompressionUtils::decompress(chunkRef.compressionFilter.get(), chunkRef.chunkBytes.get(), arena);
-		} else {
+		} else if (!chunkRef.chunkBytes.present()) {
+			// 'Encryption' & 'Compression' aren't enabled.
 			chunkRef.chunkBytes = chunkRef.buffer;
 		}
+
 		ASSERT(chunkRef.chunkBytes.present());
 
 		return chunkRef;
@@ -427,7 +473,7 @@ struct IndexedBlobGranuleFile {
 		StringRef childData(fileBytes.begin() + childPointer->offset + startOffset, blockSize);
 
 		if (BG_ENCRYPT_COMPRESS_DEBUG) {
-			TraceEvent("GetChild")
+			TraceEvent(SevDebug, "GetChild")
 			    .detail("BlkSize", blockSize)
 			    .detail("Offset", childPointer->offset)
 			    .detail("StartOffset", chunkStartOffset);
@@ -473,7 +519,7 @@ Value serializeIndexBlock(Standalone<IndexedBlobGranuleFile>& file, Optional<Blo
 	file.chunkStartOffset = serialized.contents().size();
 
 	if (BG_ENCRYPT_COMPRESS_DEBUG) {
-		TraceEvent("SerializeIndexBlock").detail("StartOffset", file.chunkStartOffset);
+		TraceEvent(SevDebug, "SerializeIndexBlock").detail("StartOffset", file.chunkStartOffset);
 	}
 
 	return ObjectWriter::toValue(file, Unversioned());
@@ -521,7 +567,7 @@ Value serializeChunkedSnapshot(Standalone<GranuleSnapshot> snapshot,
 			    file.arena(), currentChunk.begin()->key, previousChunkBytes);
 
 			if (BG_ENCRYPT_COMPRESS_DEBUG) {
-				TraceEvent("ChunkSize")
+				TraceEvent(SevDebug, "ChunkSize")
 				    .detail("ChunkBytes", chunkBytes.size())
 				    .detail("PrvChunkBytes", previousChunkBytes);
 			}
@@ -553,7 +599,7 @@ Value serializeChunkedSnapshot(Standalone<GranuleSnapshot> snapshot,
 	int idx = 0;
 	for (auto& it : chunks) {
 		if (BG_ENCRYPT_COMPRESS_DEBUG) {
-			TraceEvent("Serialize")
+			TraceEvent(SevDebug, "Serialize")
 			    .detail("ChunkIdx", idx++)
 			    .detail("Size", it.size())
 			    .detail("Offset", previousChunkBytes);
