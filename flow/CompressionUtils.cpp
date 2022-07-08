@@ -30,28 +30,28 @@
 #include <boost/iostreams/filter/zstd.hpp>
 #include <boost/iostreams/filtering_streambuf.hpp>
 
-Standalone<StringRef> CompressionUtils::compress(const CompressionFilter filter, StringRef data) {
+StringRef CompressionUtils::compress(const CompressionFilter filter, StringRef data, Arena& arena) {
 	if (filter == CompressionFilter::NONE) {
-		return Standalone<StringRef>(data);
+		return StringRef(arena, data);
 	}
 
 	namespace bio = boost::iostreams;
 	if (filter == CompressionFilter::GZIP) {
-		return CompressionUtils::compress(filter, data, bio::gzip::default_compression);
+		return CompressionUtils::compress(filter, data, bio::gzip::default_compression, arena);
 	} else if (filter == CompressionFilter::ZSTD) {
-		return CompressionUtils::compress(filter, data, bio::zstd::default_compression);
+		return CompressionUtils::compress(filter, data, bio::zstd::default_compression, arena);
 	} else {
 		throw not_implemented();
 	}
 }
 
-Standalone<StringRef> CompressionUtils::compress(const CompressionFilter filter, StringRef data, int level) {
+StringRef CompressionUtils::compress(const CompressionFilter filter, StringRef data, int level, Arena& arena) {
 	if (filter == CompressionFilter::NONE) {
-		return Standalone<StringRef>(data);
+		return StringRef(arena, data);
 	}
 
 	// FIXME: Remove after resolving compilation issues
-	return Standalone<StringRef>(data);
+	return StringRef(arena, data);
 
 	/*
 	namespace bio = boost::iostreams;
@@ -69,7 +69,7 @@ Standalone<StringRef> CompressionUtils::compress(const CompressionFilter filter,
 	out.push(decomStream);
 	bio::copy(out, compStream);
 
-	return Standalone<StringRef>(compStream.str());
+	return StringRef(arena, compStream.str());
 	*/
 }
 
@@ -97,7 +97,7 @@ StringRef CompressionUtils::decompress(const CompressionFilter filter, StringRef
 	out.push(compStream);
 	bio::copy(out, decompStream);
 
-	return Standalone<StringRef>(decompStream.str());
+	return StringRef(arena, decompStream.str());
 	*/
 }
 
@@ -107,7 +107,7 @@ TEST_CASE("flow/CompressionUtils/noCompression") {
 	Standalone<StringRef> uncompressed = makeString(size);
 	generateRandomData(mutateString(uncompressed), size);
 
-	Standalone<StringRef> compressed = CompressionUtils::compress(CompressionFilter::NONE, uncompressed);
+	Standalone<StringRef> compressed = CompressionUtils::compress(CompressionFilter::NONE, uncompressed, arena);
 	ASSERT_EQ(compressed.compare(uncompressed), 0);
 
 	StringRef verify = CompressionUtils::decompress(CompressionFilter::NONE, compressed, arena);
@@ -122,7 +122,7 @@ TEST_CASE("flow/CompressionUtils/zstdCompression") {
 	Standalone<StringRef> uncompressed = makeString(size);
 	generateRandomData(mutateString(uncompressed), size);
 
-	Standalone<StringRef> compressed = CompressionUtils::compress(CompressionFilter::ZSTD, uncompressed);
+	Standalone<StringRef> compressed = CompressionUtils::compress(CompressionFilter::ZSTD, uncompressed, arena);
 	ASSERT_EQ(compressed.compare(uncompressed), 0);
 
 	StringRef verify = CompressionUtils::decompress(CompressionFilter::ZSTD, compressed, arena);
@@ -137,7 +137,7 @@ TEST_CASE("flow/CompressionUtils/gzipCompression") {
 	Standalone<StringRef> uncompressed = makeString(size);
 	generateRandomData(mutateString(uncompressed), size);
 
-	Standalone<StringRef> compressed = CompressionUtils::compress(CompressionFilter::GZIP, uncompressed);
+	Standalone<StringRef> compressed = CompressionUtils::compress(CompressionFilter::GZIP, uncompressed, arena);
 	ASSERT_EQ(compressed.compare(uncompressed), 0);
 
 	StringRef verify = CompressionUtils::decompress(CompressionFilter::GZIP, compressed, arena);

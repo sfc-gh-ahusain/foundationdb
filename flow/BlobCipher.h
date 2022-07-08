@@ -19,6 +19,7 @@
  */
 #pragma once
 
+#include "flow/ProtocolVersion.h"
 #include "flow/network.h"
 #include <cinttypes>
 #include <memory>
@@ -80,7 +81,6 @@ private:
 
 #pragma pack(push, 1) // exact fit - no padding
 struct BlobCipherDetails {
-	constexpr static FileIdentifier file_identifier = 1721113;
 	// Encryption domain boundary identifier.
 	EncryptCipherDomainId encryptDomainId = ENCRYPT_INVALID_DOMAIN_ID;
 	// BaseCipher encryption key identifier
@@ -97,10 +97,9 @@ struct BlobCipherDetails {
 	bool operator==(const BlobCipherDetails& o) const {
 		return encryptDomainId == o.encryptDomainId && baseCipherId == o.baseCipherId && salt == o.salt;
 	}
-
 	template <class Ar>
 	void serialize(Ar& ar) {
-		serializer(ar, encryptDomainId, baseCipherId, salt);
+		ar.serializeBytes(this, sizeof(BlobCipherDetails));
 	}
 };
 #pragma pack(pop)
@@ -126,7 +125,7 @@ struct hash<BlobCipherDetails> {
 
 #pragma pack(push, 1) // exact fit - no padding
 typedef struct BlobCipherEncryptHeader {
-	static constexpr int headerSize = 104;
+	static constexpr int headerSize = 136;
 	union {
 		struct {
 			uint8_t size; // reading first byte is sufficient to determine header
@@ -177,7 +176,16 @@ typedef struct BlobCipherEncryptHeader {
 	BlobCipherEncryptHeader() {}
 
 	static BlobCipherEncryptHeader fromStringRef(StringRef headerRef) {
-		return BinaryReader::fromStringRef<BlobCipherEncryptHeader>(headerRef, Unversioned());
+		BlobCipherEncryptHeader header;
+		BinaryReader rd(headerRef, AssumeVersion(currentProtocolVersion));
+		rd >> header;
+		return header;
+	}
+
+	static Standalone<StringRef> toStringRef(BlobCipherEncryptHeader& header) {
+		BinaryWriter wr(AssumeVersion(currentProtocolVersion));
+		wr.serializeBytes(&header, header.flags.size);
+		return wr.toValue();
 	}
 
 	template <class Ar>
@@ -212,7 +220,6 @@ public:
 	              const uint8_t* baseCiph,
 	              int baseCiphLen,
 	              const EncryptCipherRandomSalt& salt);
-	BlobCipherKey(const BlobCipherDetails& details, StringRef baseCipherRef);
 
 	uint8_t* data() const { return cipher.get(); }
 	uint64_t getCreationTime() const { return creationTime; }
@@ -451,7 +458,7 @@ public:
 	                              Arena&);
 	Standalone<StringRef> encryptBlobGranuleChunk(const uint8_t* plaintext, const int plaintextLen);
 
-	Standalone<StringRef> generateBlobFileEncryptionHeader(StringRef ciphertext);
+	Standalone<StringRef> generateBlobFileEncryptionHeader(const uint8_t* ciphertext, const int ciphertextLen);
 
 private:
 	EVP_CIPHER_CTX* ctx;

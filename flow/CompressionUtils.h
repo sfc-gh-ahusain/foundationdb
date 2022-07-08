@@ -30,8 +30,8 @@
 enum class CompressionFilter { NONE, ZSTD, GZIP };
 
 struct CompressionUtils {
-	static Standalone<StringRef> compress(const CompressionFilter filter, StringRef data);
-	static Standalone<StringRef> compress(const CompressionFilter filter, StringRef data, int level);
+	static StringRef compress(const CompressionFilter filter, StringRef data, Arena& arena);
+	static StringRef compress(const CompressionFilter filter, StringRef data, int level, Arena& arena);
 	static StringRef decompress(const CompressionFilter filter, StringRef data, Arena& arena);
 	static StringRef decompress(const CompressionFilter filter, StringRef data, int level, Arena& arena);
 

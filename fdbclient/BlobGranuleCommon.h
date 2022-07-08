@@ -20,15 +20,16 @@
 
 #ifndef FDBCLIENT_BLOBGRANULECOMMON_H
 #define FDBCLIENT_BLOBGRANULECOMMON_H
-#include "flow/BlobCipher.h"
-#include "flow/IRandom.h"
-#include "flow/serialize.h"
 #pragma once
-
-#include <sstream>
 
 #include "fdbclient/CommitTransaction.h"
 #include "fdbclient/FDBTypes.h"
+#include "flow/BlobCipher.h"
+#include "flow/EncryptUtils.h"
+#include "flow/IRandom.h"
+#include "flow/serialize.h"
+
+#include <sstream>
 
 // file format of actual blob files
 // FIXME: use VecSerStrategy::String serialization for this
@@ -52,26 +53,52 @@ struct GranuleDeltas : VectorRef<MutationsAndVersionRef> {
 };
 
 struct BlobGranuleCipherKeysMeta {
-	BlobCipherDetails textCipherDetails;
-	BlobCipherDetails headerCipherDetails;
+	constexpr static FileIdentifier file_identifier = 7274734;
+	EncryptCipherDomainId textDomainId;
+	EncryptCipherBaseKeyId textBaseCipherId;
+	EncryptCipherRandomSalt textSalt;
+
+	EncryptCipherDomainId headerDomainId;
+	EncryptCipherBaseKeyId headerBaseCipherId;
+	EncryptCipherRandomSalt headerSalt;
+
 	StringRef ivRef;
+
+	void setTextCipherDetails(const EncryptCipherDomainId& domainId,
+	                          const EncryptCipherBaseKeyId& baseCipherId,
+	                          const EncryptCipherRandomSalt& salt) {
+		textDomainId = domainId;
+		textBaseCipherId = baseCipherId;
+		textSalt = salt;
+	}
+
+	void setHeaderCipherDetails(const EncryptCipherDomainId& domainId,
+	                            const EncryptCipherBaseKeyId& baseCipherId,
+	                            const EncryptCipherRandomSalt& salt) {
+		headerDomainId = domainId;
+		headerBaseCipherId = baseCipherId;
+		headerSalt = salt;
+	}
 
 	template <class Ar>
 	void serialize(Ar& ar) {
-		serializer(ar, textCipherDetails, headerCipherDetails, ivRef);
+		serializer(ar, textDomainId, textBaseCipherId, textSalt, headerDomainId, headerBaseCipherId, headerSalt, ivRef);
 	}
 };
 
 struct BlobGranuleCipherKey {
-	BlobCipherDetails cipherDetails;
+	constexpr static FileIdentifier file_identifier = 7274734;
+	EncryptCipherDomainId encryptDomainId;
+	EncryptCipherBaseKeyId baseCipherId;
+	EncryptCipherRandomSalt salt;
 	StringRef baseCipher;
 
 	static BlobGranuleCipherKey fromBlobCipherKey(Reference<BlobCipherKey> keyRef, Arena& arena) {
 		BlobGranuleCipherKey cipherKey;
 
-		cipherKey.cipherDetails.encryptDomainId = keyRef->getDomainId();
-		cipherKey.cipherDetails.baseCipherId = keyRef->getBaseCipherId();
-		cipherKey.cipherDetails.salt = keyRef->getSalt();
+		cipherKey.encryptDomainId = keyRef->getDomainId();
+		cipherKey.baseCipherId = keyRef->getBaseCipherId();
+		cipherKey.salt = keyRef->getSalt();
 		cipherKey.baseCipher = makeString(keyRef->getBaseCipherLen(), arena);
 		memcpy(mutateString(cipherKey.baseCipher), keyRef->rawBaseCipher(), keyRef->getBaseCipherLen());
 		return cipherKey;
@@ -79,11 +106,12 @@ struct BlobGranuleCipherKey {
 
 	template <class Ar>
 	void serialize(Ar& ar) {
-		serializer(ar, cipherDetails, baseCipher);
+		serializer(ar, encryptDomainId, baseCipherId, salt, baseCipher);
 	}
 };
 
 struct BlobGranuleCipherKeysCtx {
+	constexpr static FileIdentifier file_identifier = 1278718;
 	BlobGranuleCipherKey textCipherKey;
 	BlobGranuleCipherKey headerCipherKey;
 	StringRef ivRef;
@@ -91,8 +119,10 @@ struct BlobGranuleCipherKeysCtx {
 	BlobGranuleCipherKeysMeta toCipherKeysMeta(Arena& arena) {
 		BlobGranuleCipherKeysMeta cipherKeysMeta;
 
-		cipherKeysMeta.textCipherDetails = textCipherKey.cipherDetails;
-		cipherKeysMeta.headerCipherDetails = headerCipherKey.cipherDetails;
+		cipherKeysMeta.setTextCipherDetails(
+		    textCipherKey.encryptDomainId, textCipherKey.baseCipherId, textCipherKey.salt);
+		cipherKeysMeta.setHeaderCipherDetails(
+		    headerCipherKey.encryptDomainId, headerCipherKey.baseCipherId, headerCipherKey.salt);
 		cipherKeysMeta.ivRef = makeString(AES_256_IV_LENGTH, arena);
 		generateRandomData(mutateString(cipherKeysMeta.ivRef), AES_256_IV_LENGTH);
 		return cipherKeysMeta;
@@ -102,6 +132,11 @@ struct BlobGranuleCipherKeysCtx {
 	void serialize(Ar& ar) {
 		serializer(ar, textCipherKey, headerCipherKey, ivRef);
 	}
+};
+
+struct BlobGranuleFileEncryptionKeys {
+	Reference<BlobCipherKey> textCipherKey;
+	Reference<BlobCipherKey> headerCipherKey;
 };
 
 struct BlobFilePointerRef {
@@ -135,12 +170,10 @@ struct BlobFilePointerRef {
 		std::stringstream ss;
 		ss << filename.toString() << ":" << offset << ":" << length << ":" << fullFileLength;
 		if (cipherKeysMeta.present()) {
-			ss << ":CipherKeysMeta:TextCipher:" << cipherKeysMeta.get().textCipherDetails.encryptDomainId << ":"
-			   << cipherKeysMeta.get().textCipherDetails.baseCipherId << ":"
-			   << cipherKeysMeta.get().textCipherDetails.salt
-			   << ":HeaderCipher:" << cipherKeysMeta.get().headerCipherDetails.encryptDomainId << ":"
-			   << cipherKeysMeta.get().headerCipherDetails.baseCipherId << ":"
-			   << cipherKeysMeta.get().headerCipherDetails.salt;
+			ss << ":CipherKeysMeta:TextCipher:" << cipherKeysMeta.get().textDomainId << ":"
+			   << cipherKeysMeta.get().textBaseCipherId << ":" << cipherKeysMeta.get().textSalt
+			   << ":HeaderCipher:" << cipherKeysMeta.get().headerDomainId << ":"
+			   << cipherKeysMeta.get().headerBaseCipherId << ":" << cipherKeysMeta.get().headerSalt;
 		}
 		return std::move(ss).str();
 	}

@@ -19,11 +19,14 @@
  */
 
 #include <cstring>
+#include <utility>
 #include <vector>
 
 #include "contrib/fmt-8.1.1/include/fmt/format.h"
+#include "fdbclient/AsyncFileS3BlobStore.actor.h"
 #include "fdbclient/BlobGranuleCommon.h"
 #include "fdbclient/ClientKnobs.h"
+#include "fdbclient/FDBTypes.h"
 #include "fdbclient/ServerKnobs.h"
 #include "fdbserver/Knobs.h"
 #include "flow/Arena.h"
@@ -37,14 +40,17 @@
 #include "flow/IRandom.h"
 #include "flow/ObjectSerializer.h"
 #include "flow/StreamCipher.h"
+#include "flow/Trace.h"
 #include "flow/TreeBenchmark.h"
 #include "flow/serialize.h"
 #include "fdbclient/BlobGranuleFiles.h"
 #include "fdbclient/Knobs.h"
 #include "fdbclient/SystemData.h" // for allKeys unit test - could remove
 #include "flow/UnitTest.h"
+#include "flow/xxhash.h"
 
 #define BG_READ_DEBUG false
+#define BG_ENCRYPT_COMPRESS_DEBUG true
 
 // FIXME: implement actual proper file format for this
 
@@ -88,9 +94,62 @@ struct ChildBlockPointerRef {
 	};
 };
 
-struct IndexBlockRef {
-	constexpr static FileIdentifier file_identifier = 1945731;
+namespace {
+BlobGranuleFileEncryptionKeys getEncryptBlobCipherKey(const BlobGranuleCipherKeysCtx cipherKeysCtx) {
+	BlobGranuleFileEncryptionKeys eKeys;
 
+	eKeys.textCipherKey = makeReference<BlobCipherKey>(cipherKeysCtx.textCipherKey.encryptDomainId,
+	                                                   cipherKeysCtx.textCipherKey.baseCipherId,
+	                                                   cipherKeysCtx.textCipherKey.baseCipher.begin(),
+	                                                   cipherKeysCtx.textCipherKey.baseCipher.size(),
+	                                                   cipherKeysCtx.textCipherKey.salt);
+	eKeys.headerCipherKey = makeReference<BlobCipherKey>(cipherKeysCtx.headerCipherKey.encryptDomainId,
+	                                                     cipherKeysCtx.headerCipherKey.baseCipherId,
+	                                                     cipherKeysCtx.headerCipherKey.baseCipher.begin(),
+	                                                     cipherKeysCtx.headerCipherKey.baseCipher.size(),
+	                                                     cipherKeysCtx.headerCipherKey.salt);
+
+	return eKeys;
+}
+
+void validateEncryptionHeaderDetails(const BlobGranuleFileEncryptionKeys& eKeys,
+                                     const BlobCipherEncryptHeader& header,
+                                     const StringRef& ivRef) {
+	if ( // Validate encryption header 'cipherHeader' details sanity
+	    !(header.cipherHeaderDetails.baseCipherId == eKeys.headerCipherKey->getBaseCipherId() ||
+	      header.cipherHeaderDetails.encryptDomainId == eKeys.headerCipherKey->getDomainId() ||
+	      header.cipherHeaderDetails.salt == eKeys.headerCipherKey->getSalt()) ||
+	    // Validate encryption header 'cipherText' details sanity
+	    !(header.cipherTextDetails.baseCipherId == eKeys.textCipherKey->getBaseCipherId() ||
+	      header.cipherTextDetails.encryptDomainId == eKeys.textCipherKey->getDomainId() ||
+	      header.cipherTextDetails.salt == eKeys.textCipherKey->getSalt()) ||
+	    // Validate 'Initialization Vector' sanity
+	    (memcmp(ivRef.begin(), &header.iv[0], AES_256_IV_LENGTH) != 0)) {
+		TraceEvent("EncryptionHeader_Mismatch")
+		    .detail("HeaderBaseCipherId", eKeys.headerCipherKey->getBaseCipherId())
+		    .detail("ExpectedHeaderBaseCipherId", header.cipherHeaderDetails.baseCipherId)
+		    .detail("HeaderDomainId", eKeys.headerCipherKey->getDomainId())
+		    .detail("ExpectedHeaderDomainId", header.cipherHeaderDetails.encryptDomainId)
+		    .detail("HeaderSalt", eKeys.headerCipherKey->getSalt())
+		    .detail("ExpectedHeaderSalt", header.cipherHeaderDetails.salt)
+		    .detail("TextBaseCipherId", eKeys.textCipherKey->getBaseCipherId())
+		    .detail("ExpectedTextBaseCipherId", header.cipherTextDetails.baseCipherId)
+		    .detail("TextDomainId", eKeys.textCipherKey->getDomainId())
+		    .detail("ExpectedTextDomainId", header.cipherTextDetails.encryptDomainId)
+		    .detail("TextSalt", eKeys.textCipherKey->getSalt())
+		    .detail("ExpectedHeaderSalt", header.cipherTextDetails.salt)
+		    .detail("IVChecksum", XXH3_64bits(ivRef.begin(), ivRef.size()))
+		    .detail("ExpectedIVChecksum", XXH3_64bits(&header.iv[0], AES_256_IV_LENGTH));
+		throw encrypt_header_metadata_mismatch();
+	}
+}
+
+} // namespace
+
+struct IndexBlock {
+	constexpr static FileIdentifier file_identifier = 6525412;
+
+	// Serializable fields
 	VectorRef<ChildBlockPointerRef> children;
 
 	template <class Ar>
@@ -99,96 +158,186 @@ struct IndexBlockRef {
 	}
 };
 
-struct BlobGranuleEncryptedStringRef {
-	constexpr static FileIdentifier file_identifier = 1175274;
+struct IndexBlockRef {
+	constexpr static FileIdentifier file_identifier = 1945731;
 
-	// Serializable fields
-	uint8_t encryptMode;
-	StringRef header;
+	// Serialized fields
+	Optional<StringRef> encryptHeaderRef;
+	// Encrypted/unencrypted IndexBlock
 	StringRef buffer;
 
 	// Non-serializable fields
-	Optional<BlobCipherEncryptHeader> encryptionHeader;
-	Optional<Reference<EncryptBlobCipherAes265Ctr>> encryptor;
-	Optional<Reference<DecryptBlobCipherAes256Ctr>> decryptor;
+	IndexBlock block;
 
-	BlobGranuleEncryptedStringRef() { encryptMode = encryptModeFromString(SERVER_KNOBS->ENCRYPTION_MODE); }
-
-	StringRef decrypt(BlobGranuleCipherKeysCtx cipherKeysCtx, StringRef encryptedBuff, Arena& arena) {
-		// Ensure sanity of the on-disk 'encryption header'
-		validateHeader(cipherKeysCtx, arena);
-
-		// TODO: optimize memcpy operations
-		Reference<EncryptBuf> decrypted =
-		    decryptor.get()->decrypt(encryptedBuff.begin(), encryptedBuff.size(), encryptionHeader.get(), arena);
-		return StringRef(arena, decrypted->begin(), decrypted->getLogicalSize());
+	IndexBlockRef() {
+		// Initialize the optionals to account for memory allocation
+		if (SERVER_KNOBS->ENABLE_BLOB_FILE_ENCRYPTION) {
+			BlobCipherEncryptHeader header{};
+			encryptHeaderRef = BlobCipherEncryptHeader::toStringRef(header);
+		}
 	}
 
-	Value encryptChunk(BlobGranuleCipherKeysCtx cipherKeysCtx, Value chunk) {
-		if (!encryptor.present() || !encryptor.get().isValid()) {
-			initEncryptor(cipherKeysCtx);
-			ASSERT(encryptor.present() && encryptor.get().isValid());
-		}
+	void encrypt(const BlobGranuleCipherKeysCtx cipherKeysCtx, Arena& arena) {
+		BlobGranuleFileEncryptionKeys eKeys = getEncryptBlobCipherKey(cipherKeysCtx);
+		ASSERT(eKeys.headerCipherKey.isValid() && eKeys.textCipherKey.isValid());
 
-		return encryptor.get()->encryptBlobGranuleChunk(chunk.begin(), chunk.size());
+		EncryptBlobCipherAes265Ctr encryptor(eKeys.textCipherKey,
+		                                     eKeys.headerCipherKey,
+		                                     cipherKeysCtx.ivRef.begin(),
+		                                     AES_256_IV_LENGTH,
+		                                     ENCRYPT_HEADER_AUTH_TOKEN_MODE_SINGLE);
+		Value serializedBuff = ObjectWriter::toValue(block, Unversioned());
+		BlobCipherEncryptHeader header;
+		buffer = encryptor.encrypt(serializedBuff.contents().begin(), serializedBuff.contents().size(), &header, arena)
+		             ->toStringRef();
+		encryptHeaderRef = StringRef(arena, BlobCipherEncryptHeader::toStringRef(header).contents());
 	}
 
-	void updateHeaderAndBuffer(BlobGranuleCipherKeysCtx cipherKeysCtx, StringRef encryptedBuff) {
-		if (!encryptor.present() || !encryptor.get().isValid()) {
-			initEncryptor(cipherKeysCtx);
-			ASSERT(encryptor.present() && encryptor.get().isValid());
-		}
+	static void decrypt(const BlobGranuleCipherKeysCtx cipherKeysCtx, IndexBlockRef& idxRef, Arena& arena) {
+		BlobGranuleFileEncryptionKeys eKeys = getEncryptBlobCipherKey(cipherKeysCtx);
+		ASSERT(eKeys.headerCipherKey.isValid() && eKeys.textCipherKey.isValid());
 
-		header = encryptor.get()->generateBlobFileEncryptionHeader(encryptedBuff);
-		buffer = encryptedBuff;
+		ASSERT(idxRef.encryptHeaderRef.present());
+		BlobCipherEncryptHeader header = BlobCipherEncryptHeader::fromStringRef(idxRef.encryptHeaderRef.get());
+
+		validateEncryptionHeaderDetails(eKeys, header, cipherKeysCtx.ivRef);
+
+		DecryptBlobCipherAes256Ctr decryptor(eKeys.textCipherKey, eKeys.headerCipherKey, cipherKeysCtx.ivRef.begin());
+		StringRef decrypted =
+		    decryptor.decrypt(idxRef.buffer.begin(), idxRef.buffer.size(), header, arena)->toStringRef();
+
+		ObjectReader dataReader(decrypted.begin(), Unversioned());
+		dataReader.deserialize(FileIdentifierFor<IndexBlock>::value, idxRef.block, arena);
+	}
+
+	void init(Optional<BlobGranuleCipherKeysCtx> cipherKeysCtx, Arena& arena) {
+		if (encryptHeaderRef.present()) {
+			ASSERT(SERVER_KNOBS->ENABLE_BLOB_FILE_ENCRYPTION);
+			ASSERT(cipherKeysCtx.present());
+
+			decrypt(cipherKeysCtx.get(), *this, arena);
+		} else {
+			TraceEvent("IndexBlockSize").detail("Sz", buffer.size());
+			ObjectReader dataReader(buffer.begin(), Unversioned());
+			dataReader.deserialize(FileIdentifierFor<IndexBlock>::value, block, arena);
+		}
+	}
+
+	void finalize(Optional<BlobGranuleCipherKeysCtx> cipherKeysCtx, Arena& arena) {
+		if (SERVER_KNOBS->ENABLE_BLOB_FILE_ENCRYPTION) {
+			ASSERT(cipherKeysCtx.present());
+			encrypt(cipherKeysCtx.get(), arena);
+		} else {
+			encryptHeaderRef.reset();
+			buffer = StringRef(arena, ObjectWriter::toValue(block, Unversioned()).contents());
+		}
+		TraceEvent("IndexBlockSize").detail("Sz", buffer.size());
 	}
 
 	template <class Ar>
 	void serialize(Ar& ar) {
-		serializer(ar, header, buffer);
+		serializer(ar, encryptHeaderRef, buffer);
+	}
+};
+
+struct IndexBlobGranuleFileChunkRef {
+	constexpr static FileIdentifier file_identifier = 2814019;
+
+	// Serialized fields
+	Optional<CompressionFilter> compressionFilter;
+	Optional<StringRef> encryptHeaderRef;
+	// encypted and/or compressed chunk;
+	StringRef buffer;
+
+	// Non-serialized
+	Optional<StringRef> chunkBytes;
+
+	static void encrypt(const BlobGranuleCipherKeysCtx& cipherKeysCtx,
+	                    IndexBlobGranuleFileChunkRef& blobChunkRef,
+	                    Arena& arena) {
+		ASSERT(SERVER_KNOBS->ENABLE_BLOB_FILE_ENCRYPTION);
+
+		BlobGranuleFileEncryptionKeys eKeys = getEncryptBlobCipherKey(cipherKeysCtx);
+
+		ASSERT(eKeys.headerCipherKey.isValid() && eKeys.textCipherKey.isValid());
+
+		EncryptBlobCipherAes265Ctr encryptor(eKeys.textCipherKey,
+		                                     eKeys.headerCipherKey,
+		                                     cipherKeysCtx.ivRef.begin(),
+		                                     AES_256_IV_LENGTH,
+		                                     ENCRYPT_HEADER_AUTH_TOKEN_MODE_SINGLE);
+		BlobCipherEncryptHeader header;
+		blobChunkRef.buffer =
+		    encryptor.encrypt(blobChunkRef.buffer.begin(), blobChunkRef.buffer.size(), &header, arena)->toStringRef();
+		blobChunkRef.encryptHeaderRef = StringRef(arena, BlobCipherEncryptHeader::toStringRef(header));
 	}
 
-private:
-	void initEncryptor(BlobGranuleCipherKeysCtx cipherKeysCtx) {
-		Reference<BlobCipherKey> textCipherKey = makeReference<BlobCipherKey>(cipherKeysCtx.textCipherKey.cipherDetails,
-		                                                                      cipherKeysCtx.textCipherKey.baseCipher);
-		Reference<BlobCipherKey> headerCipherKey = makeReference<BlobCipherKey>(
-		    cipherKeysCtx.headerCipherKey.cipherDetails, cipherKeysCtx.headerCipherKey.baseCipher);
-		encryptor = makeReference<EncryptBlobCipherAes265Ctr>(textCipherKey,
-		                                                      headerCipherKey,
-		                                                      cipherKeysCtx.ivRef.begin(),
-		                                                      cipherKeysCtx.ivRef.size(),
-		                                                      ENCRYPT_HEADER_AUTH_TOKEN_MODE_MULTI);
-	}
+	static Value toBytes(Optional<BlobGranuleCipherKeysCtx> cipherKeysCtx, const Value& chunk, Arena& arena) {
+		IndexBlobGranuleFileChunkRef blobChunkRef;
 
-	void initDecryptor(BlobGranuleCipherKeysCtx cipherKeysCtx) {
-		Reference<BlobCipherKey> textCipherKey = makeReference<BlobCipherKey>(cipherKeysCtx.textCipherKey.cipherDetails,
-		                                                                      cipherKeysCtx.textCipherKey.baseCipher);
-		Reference<BlobCipherKey> headerCipherKey = makeReference<BlobCipherKey>(
-		    cipherKeysCtx.headerCipherKey.cipherDetails, cipherKeysCtx.headerCipherKey.baseCipher);
-		decryptor =
-		    makeReference<DecryptBlobCipherAes256Ctr>(textCipherKey, headerCipherKey, cipherKeysCtx.ivRef.begin());
-	}
-
-	void validateHeader(BlobGranuleCipherKeysCtx cipherKeysCtx, Arena& arena) {
-		if (decryptor.present() && decryptor.get().isValid()) {
-			// Encryption header already validated; do nothing.
-			return;
+		if (SERVER_KNOBS->ENABLE_BLOB_FILE_COMPRESSION) {
+			blobChunkRef.compressionFilter =
+			    CompressionUtils::fromFilterString(SERVER_KNOBS->BLOB_FILE_COMPRESSION_FILTER);
+			blobChunkRef.buffer = CompressionUtils::compress(blobChunkRef.compressionFilter.get(), chunk, arena);
+		} else {
+			blobChunkRef.buffer = StringRef(arena, chunk);
 		}
 
-		encryptionHeader = BlobCipherEncryptHeader::fromStringRef(header);
-		if (encryptionHeader.get().flags.authTokenMode !=
-		        ENCRYPT_HEADER_AUTH_TOKEN_MODE_MULTI || // BlobFiles should have MultiAuthToken mode set
-		    !(cipherKeysCtx.headerCipherKey.cipherDetails == encryptionHeader.get().cipherHeaderDetails) ||
-		    !(cipherKeysCtx.textCipherKey.cipherDetails == encryptionHeader.get().cipherTextDetails) ||
-		    memcmp(cipherKeysCtx.ivRef.begin(), &encryptionHeader.get().iv[0], AES_256_IV_LENGTH) != 0) {
-			throw encrypt_header_metadata_mismatch();
+		if (SERVER_KNOBS->ENABLE_BLOB_FILE_ENCRYPTION) {
+			ASSERT(cipherKeysCtx.present());
+			IndexBlobGranuleFileChunkRef::encrypt(cipherKeysCtx.get(), blobChunkRef, arena);
 		}
 
-		initDecryptor(cipherKeysCtx);
-		ASSERT(decryptor.present() && decryptor.get().isValid());
+		// TODO: Add version?
+		return Standalone<StringRef>(ObjectWriter::toValue(blobChunkRef, Unversioned()).contents(), arena);
+	}
 
-		decryptor.get()->verifyHeaderAuthToken(encryptionHeader.get(), arena);
+	static StringRef decrypt(const BlobGranuleCipherKeysCtx& cipherKeysCtx,
+	                         const IndexBlobGranuleFileChunkRef& blobChunkRef,
+	                         Arena& arena) {
+		ASSERT(SERVER_KNOBS->ENABLE_BLOB_FILE_ENCRYPTION);
+
+		BlobGranuleFileEncryptionKeys eKeys = getEncryptBlobCipherKey(cipherKeysCtx);
+
+		ASSERT(eKeys.headerCipherKey.isValid() && eKeys.textCipherKey.isValid());
+		ASSERT(blobChunkRef.encryptHeaderRef.present());
+
+		BlobCipherEncryptHeader header = BlobCipherEncryptHeader::fromStringRef(blobChunkRef.encryptHeaderRef.get());
+
+		validateEncryptionHeaderDetails(eKeys, header, cipherKeysCtx.ivRef);
+
+		DecryptBlobCipherAes256Ctr decryptor(eKeys.textCipherKey, eKeys.headerCipherKey, cipherKeysCtx.ivRef.begin());
+		return decryptor.decrypt(blobChunkRef.buffer.begin(), blobChunkRef.buffer.size(), header, arena)->toStringRef();
+	}
+
+	static IndexBlobGranuleFileChunkRef fromBytes(Optional<BlobGranuleCipherKeysCtx> cipherKeysCtx,
+	                                              StringRef buffer,
+	                                              Arena& arena) {
+		IndexBlobGranuleFileChunkRef chunkRef;
+		// TODO: Add version?
+		ObjectReader dataReader(buffer.begin(), Unversioned());
+		dataReader.deserialize(FileIdentifierFor<IndexBlobGranuleFileChunkRef>::value, chunkRef, arena);
+
+		if (chunkRef.encryptHeaderRef.present()) {
+			ASSERT(cipherKeysCtx.present());
+			ASSERT(SERVER_KNOBS->ENABLE_BLOB_FILE_ENCRYPTION);
+			chunkRef.chunkBytes = IndexBlobGranuleFileChunkRef::decrypt(cipherKeysCtx.get(), chunkRef, arena);
+		}
+
+		if (chunkRef.compressionFilter.present()) {
+			chunkRef.chunkBytes =
+			    CompressionUtils::decompress(chunkRef.compressionFilter.get(), chunkRef.chunkBytes.get(), arena);
+		} else {
+			chunkRef.chunkBytes = chunkRef.buffer;
+		}
+		ASSERT(chunkRef.chunkBytes.present());
+
+		return chunkRef;
+	}
+
+	template <class Ar>
+	void serialize(Ar& ar) {
+		serializer(ar, compressionFilter, encryptHeaderRef, buffer);
 	}
 };
 
@@ -202,10 +351,8 @@ struct IndexedBlobGranuleFile {
 	uint16_t formatVersion;
 	uint8_t fileType;
 	Optional<StringRef> filter; // not used currently
-
-	Optional<BlobGranuleEncryptedStringRef> encrypted;
-	CompressionFilter compressionFilter;
-	Optional<IndexBlockRef> indexBlock;
+	IndexBlockRef indexBlockRef;
+	int chunkStartOffset;
 
 	// Non-serialized member fields
 	StringRef fileBytes;
@@ -213,70 +360,17 @@ struct IndexedBlobGranuleFile {
 	void init(Optional<BlobGranuleCipherKeysCtx> cipherKeysCtx) {
 		formatVersion = LATEST_BG_FORMAT_VERSION;
 		fileType = SNAPSHOT_FILE_TYPE;
+		chunkStartOffset = -1;
 
-		if (SERVER_KNOBS->ENABLE_BLOB_FILE_COMPRESSION) {
-			compressionFilter = CompressionUtils::fromFilterString(SERVER_KNOBS->BLOB_FILE_COMPRESSION_FILTER);
-		} else {
-			compressionFilter = CompressionFilter::NONE;
-		}
-
-		if (cipherKeysCtx.present()) {
-			ASSERT(SERVER_KNOBS->ENABLE_BLOB_FILE_ENCRYPTION);
-			encrypted = BlobGranuleEncryptedStringRef();
-		}
-
-		indexBlock = IndexBlockRef();
+		ASSERT(cipherKeysCtx.present() || !SERVER_KNOBS->ENABLE_BLOB_FILE_ENCRYPTION);
 	}
 
 	void init(const StringRef& fBytes, Arena& arena, Optional<BlobGranuleCipherKeysCtx> cipherKeysCtx) {
+		ASSERT(chunkStartOffset > 0);
+
 		fileBytes = fBytes;
-
-		if (encrypted.present()) {
-			ASSERT(cipherKeysCtx.present());
-			ASSERT(!indexBlock.present());
-			ASSERT(encrypted.get().encryptMode == ENCRYPT_CIPHER_MODE_AES_256_CTR);
-
-			IndexBlockRef idxRef;
-			ObjectReader dataReader(encrypted.get().decrypt(cipherKeysCtx.get(), encrypted.get().buffer, arena).begin(),
-			                        Unversioned());
-			dataReader.deserialize(FileIdentifierFor<IndexBlockRef>::value, idxRef, arena);
-			indexBlock = idxRef;
-		} else {
-			ASSERT(indexBlock.present());
-		}
+		indexBlockRef.init(cipherKeysCtx, arena);
 		TraceEvent("IndexedBlobGranuleFiles_Init");
-	}
-
-	bool isChunkCompressed() { return compressionFilter != CompressionFilter::NONE; }
-
-	Value compressChunkIfEnabled(Value chunk) {
-		if (compressionFilter == CompressionFilter::NONE) {
-			return chunk;
-		}
-		return CompressionUtils::compress(compressionFilter, chunk);
-	}
-
-	Value uncompressChunk(StringRef buffer, Arena& arena) {
-		ASSERT(isChunkCompressed());
-
-		return CompressionUtils::decompress(compressionFilter, buffer, arena);
-	}
-
-	Value encryptChunkIfEnabled(Optional<BlobGranuleCipherKeysCtx> cipherKeysCtx, Value chunk) {
-		if (!encrypted.present()) {
-			return chunk;
-		}
-
-		ASSERT(SERVER_KNOBS->ENABLE_BLOB_FILE_ENCRYPTION);
-		ASSERT(cipherKeysCtx.present());
-
-		return encrypted.get().encryptChunk(cipherKeysCtx.get(), chunk);
-	}
-
-	Value decryptChunk(BlobGranuleCipherKeysCtx cipherKeysCtx, StringRef buffer, Arena& arena) {
-		ASSERT(encrypted.present());
-
-		return encrypted.get().decrypt(cipherKeysCtx, buffer, arena);
 	}
 
 	static Standalone<IndexedBlobGranuleFile> fromFileBytes(const StringRef& fileBytes,
@@ -289,7 +383,6 @@ struct IndexedBlobGranuleFile {
 		dataReader.deserialize(FileIdentifierFor<IndexedBlobGranuleFile>::value, file, arena);
 
 		file.init(fileBytes, arena, cipherKeysCtx);
-		ASSERT(file.indexBlock.present());
 
 		// do sanity checks
 		if (file.formatVersion > LATEST_BG_FORMAT_VERSION || file.formatVersion < MIN_SUPPORTED_BG_FORMAT_VERSION) {
@@ -306,18 +399,16 @@ struct IndexedBlobGranuleFile {
 	}
 
 	ChildBlockPointerRef* findStartBlock(const KeyRef& beginKey) const {
-		ASSERT(indexBlock.present());
-
 		ChildBlockPointerRef searchKey(beginKey, 0);
-		ChildBlockPointerRef* startBlock = (ChildBlockPointerRef*)std::lower_bound(indexBlock.get().children.begin(),
-		                                                                           indexBlock.get().children.end(),
+		ChildBlockPointerRef* startBlock = (ChildBlockPointerRef*)std::lower_bound(indexBlockRef.block.children.begin(),
+		                                                                           indexBlockRef.block.children.end(),
 		                                                                           searchKey,
 		                                                                           ChildBlockPointerRef::OrderByKey());
 
-		if (startBlock != indexBlock.get().children.end() && startBlock != indexBlock.get().children.begin() &&
+		if (startBlock != indexBlockRef.block.children.end() && startBlock != indexBlockRef.block.children.begin() &&
 		    beginKey < startBlock->key) {
 			startBlock--;
-		} else if (startBlock == indexBlock.get().children.end()) {
+		} else if (startBlock == indexBlockRef.block.children.end()) {
 			startBlock--;
 		}
 
@@ -327,30 +418,30 @@ struct IndexedBlobGranuleFile {
 	// FIXME: implement some sort of iterator type interface?
 	template <class ChildType>
 	Standalone<ChildType> getChild(const ChildBlockPointerRef* childPointer,
-	                               Optional<BlobGranuleCipherKeysCtx> cipherKeysCtx) {
-		ASSERT(indexBlock.present());
-
-		ASSERT(childPointer != indexBlock.get().children.end());
+	                               Optional<BlobGranuleCipherKeysCtx> cipherKeysCtx,
+	                               int startOffset) {
+		ASSERT(childPointer != indexBlockRef.block.children.end());
 		const ChildBlockPointerRef* nextPointer = childPointer + 1;
-		ASSERT(nextPointer != indexBlock.get().children.end());
+		ASSERT(nextPointer != indexBlockRef.block.children.end());
 
 		size_t blockSize = nextPointer->offset - childPointer->offset;
-		StringRef childData(fileBytes.begin() + childPointer->offset, blockSize);
+		// Account for IndexBlockRef size for chunk offset computation
+		StringRef childData(fileBytes.begin() + childPointer->offset + startOffset, blockSize);
+
+		if (BG_ENCRYPT_COMPRESS_DEBUG) {
+			TraceEvent("GetChild")
+			    .detail("BlkSize", blockSize)
+			    .detail("Offset", childPointer->offset)
+			    .detail("StartOffset", chunkStartOffset);
+		}
 
 		Arena childArena;
+		IndexBlobGranuleFileChunkRef chunkRef =
+		    IndexBlobGranuleFileChunkRef::fromBytes(cipherKeysCtx, childData, childArena);
 
-		if (encrypted.present()) {
-			ASSERT(cipherKeysCtx.present());
-			childData = decryptChunk(cipherKeysCtx.get(), childData, childArena);
-		}
-
-		if (isChunkCompressed()) {
-			childData = uncompressChunk(childData, childArena);
-		}
-
-		// TODO: version?
 		ChildType child;
-		ObjectReader dataReader(childData.begin(), Unversioned());
+		// TODO: version?
+		ObjectReader dataReader(chunkRef.chunkBytes.get().begin(), Unversioned());
 		dataReader.deserialize(FileIdentifierFor<ChildType>::value, child, childArena);
 
 		// TODO implement some sort of decrypted+decompressed+deserialized cache, if this object gets reused?
@@ -359,7 +450,7 @@ struct IndexedBlobGranuleFile {
 
 	template <class Ar>
 	void serialize(Ar& ar) {
-		serializer(ar, formatVersion, fileType, encrypted, compressionFilter, indexBlock);
+		serializer(ar, formatVersion, fileType, filter, indexBlockRef, chunkStartOffset);
 	}
 };
 
@@ -368,30 +459,26 @@ struct IndexedBlobGranuleFile {
 // ObjectWriter/flatbuffers uses fixed size integers instead of variable size.
 
 Value serializeIndexBlock(Standalone<IndexedBlobGranuleFile>& file, Optional<BlobGranuleCipherKeysCtx> cipherKeysCtx) {
-	ASSERT(file.indexBlock.present());
-
 	// TODO: version?
-	Value indexBlock = ObjectWriter::toValue(file, Unversioned());
-	for (auto& it : file.indexBlock.get().children) {
-		it.offset += indexBlock.size();
-	}
+	/*Value indexBlock = ObjectWriter::toValue(file, Unversioned());
+	for (auto& it : file.indexBlockRef.block.children) {
+	    it.offset += indexBlock.size();
+	}*/
 
 	// NOTE: Above loop updated the indexBlock childBlock pointers offsets to be relative to IndexBlock endOffset
 	// instead of file start offset; compressing indexBlock will need offset recalculation (circular depedency).
 	// IndexBlock size is bounded by number of chunks and sizeof(KeyPrefix), 'not' compressing IndexBlock shouldn't
 	// cause significant file size bloat.
-	if (file.encrypted.present()) {
-		ASSERT(cipherKeysCtx.present());
+	file.indexBlockRef.finalize(cipherKeysCtx, file.arena());
 
-		Value toSerialize = ObjectWriter::toValue(file.indexBlock, Unversioned());
-		file.encrypted.get().updateHeaderAndBuffer(cipherKeysCtx.get(),
-		                                           file.encryptChunkIfEnabled(cipherKeysCtx.get(), toSerialize));
-		file.indexBlock.reset();
+	Value serialized = ObjectWriter::toValue(file, Unversioned());
+	file.chunkStartOffset = serialized.contents().size();
+
+	if (BG_ENCRYPT_COMPRESS_DEBUG) {
+		TraceEvent("SerializeIndexBlock").detail("StartOffset", file.chunkStartOffset);
 	}
 
-	TraceEvent("AfterSerializeIndexBlock").log();
-
-	return ObjectWriter::toValue(file, Unversioned());
+	return Standalone<StringRef>(ObjectWriter::toValue(file, Unversioned()).contents(), file.arena());
 }
 
 // TODO: this should probably be in actor file with yields?
@@ -403,7 +490,6 @@ Value serializeChunkedSnapshot(Standalone<GranuleSnapshot> snapshot,
 	Standalone<IndexedBlobGranuleFile> file;
 
 	file.init(cipherKeysCtx);
-	ASSERT(file.indexBlock.present());
 
 	size_t targetChunkBytes = snapshot.expectedSize() / chunkCount;
 	size_t currentChunkBytesEstimate = 0;
@@ -424,25 +510,25 @@ Value serializeChunkedSnapshot(Standalone<GranuleSnapshot> snapshot,
 		currentChunkBytesEstimate += snapshot[i].expectedSize();
 
 		if (currentChunkBytesEstimate >= targetChunkBytes || i == snapshot.size() - 1) {
-			// TODO: add encryption/compression for each chunk
 			// TODO: protocol version
 			Value serialized = ObjectWriter::toValue(currentChunk, Unversioned());
-
-			TraceEvent("BeforeChunkCompress").log();
-			serialized = file.compressChunkIfEnabled(serialized);
-			TraceEvent("AfterChunkCompress").log();
-			serialized = file.encryptChunkIfEnabled(cipherKeysCtx, serialized);
-			TraceEvent("AfterChunkEncrypt").log();
-			chunks.push_back(serialized);
+			Value chunkBytes = IndexBlobGranuleFileChunkRef::toBytes(cipherKeysCtx, serialized, file.arena());
+			chunks.push_back(chunkBytes);
 
 			// TODO remove validation
-			if (!file.indexBlock.get().children.empty()) {
-				ASSERT(file.indexBlock.get().children.back().key < currentChunk.begin()->key);
+			if (!file.indexBlockRef.block.children.empty()) {
+				ASSERT(file.indexBlockRef.block.children.back().key < currentChunk.begin()->key);
 			}
-			file.indexBlock.get().children.emplace_back_deep(
+			file.indexBlockRef.block.children.emplace_back_deep(
 			    file.arena(), currentChunk.begin()->key, previousChunkBytes);
 
-			previousChunkBytes += serialized.size();
+			if (BG_ENCRYPT_COMPRESS_DEBUG) {
+				TraceEvent("ChunkSize")
+				    .detail("ChunkBytes", chunkBytes.size())
+				    .detail("PrvChunkBytes", previousChunkBytes);
+			}
+
+			previousChunkBytes += chunkBytes.size();
 			currentChunkBytesEstimate = 0;
 			currentChunk = Standalone<GranuleSnapshot>();
 		}
@@ -450,17 +536,14 @@ Value serializeChunkedSnapshot(Standalone<GranuleSnapshot> snapshot,
 	ASSERT(currentChunk.empty());
 	// push back dummy last chunk to get last chunk size, and to know last key in last block without having to read it
 	if (!snapshot.empty()) {
-		file.indexBlock.get().children.emplace_back_deep(
+		file.indexBlockRef.block.children.emplace_back_deep(
 		    file.arena(), keyAfter(snapshot.back().key), previousChunkBytes);
 	}
 
-	Value indexBlock = serializeIndexBlock(file, cipherKeysCtx);
-	// Ensure if encryption is enabled, then, indexBlock gets encrypted.
-	ASSERT((file.encrypted.present() && !file.indexBlock.present()) ||
-	       (!file.encrypted.present() && file.indexBlock.present()));
+	Value indexBlockBytes = serializeIndexBlock(file, cipherKeysCtx);
 
-	int32_t indexSize = indexBlock.size();
-	chunks[0] = indexBlock;
+	int32_t indexSize = indexBlockBytes.size();
+	chunks[0] = indexBlockBytes;
 
 	// TODO: write this directly to stream to avoid extra copy?
 	Arena ret;
@@ -469,7 +552,15 @@ Value serializeChunkedSnapshot(Standalone<GranuleSnapshot> snapshot,
 	uint8_t* buffer = new (ret) uint8_t[size];
 
 	previousChunkBytes = 0;
+	int idx = 0;
 	for (auto& it : chunks) {
+		if (BG_ENCRYPT_COMPRESS_DEBUG) {
+			TraceEvent("Serialize")
+			    .detail("ChunkIdx", idx++)
+			    .detail("Size", it.size())
+			    .detail("Offset", previousChunkBytes);
+		}
+
 		memcpy(buffer + previousChunkBytes, it.begin(), it.size());
 		previousChunkBytes += it.size();
 	}
@@ -488,14 +579,14 @@ static Arena loadSnapshotFile(const StringRef& snapshotData,
 	Standalone<IndexedBlobGranuleFile> file = IndexedBlobGranuleFile::fromFileBytes(snapshotData, cipherKeysCtx);
 
 	ASSERT(file.fileType == SNAPSHOT_FILE_TYPE);
-	ASSERT(file.indexBlock.present());
+	ASSERT(file.chunkStartOffset > 0);
 
 	// empty snapshot file
-	if (file.indexBlock.get().children.empty()) {
+	if (file.indexBlockRef.block.children.empty()) {
 		return rootArena;
 	}
 
-	ASSERT(file.indexBlock.get().children.size() >= 2);
+	ASSERT(file.indexBlockRef.block.children.size() >= 2);
 
 	// TODO: refactor this out of delta tree
 	// int commonPrefixLen = commonPrefixLength(index.dataBlockOffsets.front().first,
@@ -506,8 +597,9 @@ static Arena loadSnapshotFile(const StringRef& snapshotData,
 
 	// FIXME: optimize cpu comparisons here in first/last partial blocks, doing entire blocks at once based on
 	// comparison, and using shared prefix for key comparison
-	while (currentBlock != (file.indexBlock.get().children.end() - 1) && keyRange.end > currentBlock->key) {
-		Standalone<GranuleSnapshot> dataBlock = file.getChild<GranuleSnapshot>(currentBlock, cipherKeysCtx);
+	while (currentBlock != (file.indexBlockRef.block.children.end() - 1) && keyRange.end > currentBlock->key) {
+		Standalone<GranuleSnapshot> dataBlock =
+		    file.getChild<GranuleSnapshot>(currentBlock, cipherKeysCtx, file.chunkStartOffset);
 		ASSERT(!dataBlock.empty());
 		ASSERT(currentBlock->key == dataBlock.front().key);
 
@@ -1000,9 +1092,9 @@ void checkRead(const Standalone<GranuleSnapshot>& snapshot,
 }
 
 namespace {
-const EncryptCipherDomainId encryptDomainId = deterministicRandom()->randomInt(1, 20);
-const EncryptCipherBaseKeyId encryptBaseCipherId = deterministicRandom()->randomInt(15, 100);
-const EncryptCipherRandomSalt encryptSalt = deterministicRandom()->randomInt(12345, 78600);
+const EncryptCipherDomainId encryptDomainId = deterministicRandom()->randomInt64(786, 7860);
+const EncryptCipherBaseKeyId encryptBaseCipherId = deterministicRandom()->randomUInt64();
+const EncryptCipherRandomSalt encryptSalt = deterministicRandom()->randomUInt64();
 
 Standalone<StringRef> getBaseCipher() {
 	Standalone<StringRef> baseCipher = makeString(AES_256_KEY_LENGTH);
@@ -1015,13 +1107,17 @@ Standalone<StringRef> encryptBaseCipher = getBaseCipher();
 BlobGranuleCipherKeysCtx getCipherKeysCtx(Arena& arena) {
 	BlobGranuleCipherKeysCtx cipherKeysCtx;
 
-	cipherKeysCtx.textCipherKey.cipherDetails = BlobCipherDetails(encryptDomainId, encryptBaseCipherId, encryptSalt);
+	cipherKeysCtx.textCipherKey.encryptDomainId = encryptDomainId;
+	cipherKeysCtx.textCipherKey.baseCipherId = encryptBaseCipherId;
+	cipherKeysCtx.textCipherKey.salt = encryptSalt;
 	cipherKeysCtx.textCipherKey.baseCipher = StringRef(arena, encryptBaseCipher);
-	cipherKeysCtx.headerCipherKey.cipherDetails =
-	    BlobCipherDetails(SYSTEM_KEYSPACE_ENCRYPT_DOMAIN_ID, encryptBaseCipherId, encryptSalt);
+
+	cipherKeysCtx.headerCipherKey.encryptDomainId = SYSTEM_KEYSPACE_ENCRYPT_DOMAIN_ID;
+	cipherKeysCtx.headerCipherKey.baseCipherId = encryptBaseCipherId;
+	cipherKeysCtx.headerCipherKey.salt = encryptSalt;
 	cipherKeysCtx.headerCipherKey.baseCipher = StringRef(arena, encryptBaseCipher);
 
-	cipherKeysCtx.ivRef = makeString(AES_256_IV_LENGTH);
+	cipherKeysCtx.ivRef = makeString(AES_256_IV_LENGTH, arena);
 	generateRandomData(mutateString(cipherKeysCtx.ivRef), AES_256_IV_LENGTH);
 
 	return cipherKeysCtx;
@@ -1078,13 +1174,11 @@ TEST_CASE("/blobgranule/files/snapshotFormatUnitTest") {
 	fmt::print(
 	    "Constructing snapshot with {0} rows, {1} bytes, and {2} chunks\n", data.size(), totalDataBytes, targetChunks);
 
-	Optional<BlobGranuleCipherKeysCtx> cipherKeysCtx;
+	Optional<BlobGranuleCipherKeysCtx> cipherKeysCtx = Optional<BlobGranuleCipherKeysCtx>();
 	Arena arena;
-	// if (1) { // deterministicRandom()->coinflip()) {
-	cipherKeysCtx = getCipherKeysCtx(arena);
-	//} else {
-	// cipherKeysCtx.reset();
-	//}
+	if (1) { // deterministicRandom()->coinflip()) {
+		cipherKeysCtx = getCipherKeysCtx(arena);
+	}
 	Value serialized = serializeChunkedSnapshot(data, targetChunks, cipherKeysCtx);
 
 	fmt::print("Snapshot serialized! {0} bytes\n", serialized.size());
