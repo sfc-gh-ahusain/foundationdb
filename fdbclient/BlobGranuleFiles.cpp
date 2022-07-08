@@ -28,6 +28,7 @@
 #include "fdbclient/ClientKnobs.h"
 #include "fdbclient/FDBTypes.h"
 #include "fdbclient/ServerKnobs.h"
+#include "fdbserver/BlobGranuleServerCommon.actor.h"
 #include "fdbserver/Knobs.h"
 #include "flow/Arena.h"
 #include "flow/BlobCipher.h"
@@ -169,14 +170,6 @@ struct IndexBlockRef {
 	// Non-serializable fields
 	IndexBlock block;
 
-	IndexBlockRef() {
-		// Initialize the optionals to account for memory allocation
-		if (SERVER_KNOBS->ENABLE_BLOB_FILE_ENCRYPTION) {
-			BlobCipherEncryptHeader header{};
-			encryptHeaderRef = BlobCipherEncryptHeader::toStringRef(header);
-		}
-	}
-
 	void encrypt(const BlobGranuleCipherKeysCtx cipherKeysCtx, Arena& arena) {
 		BlobGranuleFileEncryptionKeys eKeys = getEncryptBlobCipherKey(cipherKeysCtx);
 		ASSERT(eKeys.headerCipherKey.isValid() && eKeys.textCipherKey.isValid());
@@ -190,14 +183,15 @@ struct IndexBlockRef {
 		BlobCipherEncryptHeader header;
 		buffer = encryptor.encrypt(serializedBuff.contents().begin(), serializedBuff.contents().size(), &header, arena)
 		             ->toStringRef();
-		encryptHeaderRef = StringRef(arena, BlobCipherEncryptHeader::toStringRef(header).contents());
+		encryptHeaderRef = BlobCipherEncryptHeader::toStringRef(header, arena);
 	}
 
 	static void decrypt(const BlobGranuleCipherKeysCtx cipherKeysCtx, IndexBlockRef& idxRef, Arena& arena) {
 		BlobGranuleFileEncryptionKeys eKeys = getEncryptBlobCipherKey(cipherKeysCtx);
-		ASSERT(eKeys.headerCipherKey.isValid() && eKeys.textCipherKey.isValid());
 
+		ASSERT(eKeys.headerCipherKey.isValid() && eKeys.textCipherKey.isValid());
 		ASSERT(idxRef.encryptHeaderRef.present());
+
 		BlobCipherEncryptHeader header = BlobCipherEncryptHeader::fromStringRef(idxRef.encryptHeaderRef.get());
 
 		validateEncryptionHeaderDetails(eKeys, header, cipherKeysCtx.ivRef);
@@ -206,6 +200,7 @@ struct IndexBlockRef {
 		StringRef decrypted =
 		    decryptor.decrypt(idxRef.buffer.begin(), idxRef.buffer.size(), header, arena)->toStringRef();
 
+		// TODO: Add version?
 		ObjectReader dataReader(decrypted.begin(), Unversioned());
 		dataReader.deserialize(FileIdentifierFor<IndexBlock>::value, idxRef.block, arena);
 	}
@@ -218,6 +213,8 @@ struct IndexBlockRef {
 			decrypt(cipherKeysCtx.get(), *this, arena);
 		} else {
 			TraceEvent("IndexBlockSize").detail("Sz", buffer.size());
+
+			// TODO: Add version?
 			ObjectReader dataReader(buffer.begin(), Unversioned());
 			dataReader.deserialize(FileIdentifierFor<IndexBlock>::value, block, arena);
 		}
@@ -269,7 +266,7 @@ struct IndexBlobGranuleFileChunkRef {
 		BlobCipherEncryptHeader header;
 		blobChunkRef.buffer =
 		    encryptor.encrypt(blobChunkRef.buffer.begin(), blobChunkRef.buffer.size(), &header, arena)->toStringRef();
-		blobChunkRef.encryptHeaderRef = StringRef(arena, BlobCipherEncryptHeader::toStringRef(header));
+		blobChunkRef.encryptHeaderRef = BlobCipherEncryptHeader::toStringRef(header, arena);
 	}
 
 	static Value toBytes(Optional<BlobGranuleCipherKeysCtx> cipherKeysCtx, const Value& chunk, Arena& arena) {
@@ -278,9 +275,10 @@ struct IndexBlobGranuleFileChunkRef {
 		if (SERVER_KNOBS->ENABLE_BLOB_FILE_COMPRESSION) {
 			blobChunkRef.compressionFilter =
 			    CompressionUtils::fromFilterString(SERVER_KNOBS->BLOB_FILE_COMPRESSION_FILTER);
-			blobChunkRef.buffer = CompressionUtils::compress(blobChunkRef.compressionFilter.get(), chunk, arena);
+			blobChunkRef.buffer =
+			    CompressionUtils::compress(blobChunkRef.compressionFilter.get(), chunk.contents(), arena);
 		} else {
-			blobChunkRef.buffer = StringRef(arena, chunk);
+			blobChunkRef.buffer = StringRef(arena, chunk.contents());
 		}
 
 		if (SERVER_KNOBS->ENABLE_BLOB_FILE_ENCRYPTION) {
@@ -289,7 +287,7 @@ struct IndexBlobGranuleFileChunkRef {
 		}
 
 		// TODO: Add version?
-		return Standalone<StringRef>(ObjectWriter::toValue(blobChunkRef, Unversioned()).contents(), arena);
+		return ObjectWriter::toValue(blobChunkRef, Unversioned());
 	}
 
 	static StringRef decrypt(const BlobGranuleCipherKeysCtx& cipherKeysCtx,
@@ -478,7 +476,7 @@ Value serializeIndexBlock(Standalone<IndexedBlobGranuleFile>& file, Optional<Blo
 		TraceEvent("SerializeIndexBlock").detail("StartOffset", file.chunkStartOffset);
 	}
 
-	return Standalone<StringRef>(ObjectWriter::toValue(file, Unversioned()).contents(), file.arena());
+	return ObjectWriter::toValue(file, Unversioned());
 }
 
 // TODO: this should probably be in actor file with yields?

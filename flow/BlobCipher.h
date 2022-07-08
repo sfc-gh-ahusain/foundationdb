@@ -182,10 +182,10 @@ typedef struct BlobCipherEncryptHeader {
 		return header;
 	}
 
-	static Standalone<StringRef> toStringRef(BlobCipherEncryptHeader& header) {
+	static StringRef toStringRef(BlobCipherEncryptHeader& header, Arena& arena) {
 		BinaryWriter wr(AssumeVersion(currentProtocolVersion));
 		wr.serializeBytes(&header, header.flags.size);
-		return wr.toValue();
+		return wr.toValue(arena);
 	}
 
 	template <class Ar>
@@ -457,8 +457,6 @@ public:
 	                              BlobCipherEncryptHeader* header,
 	                              Arena&);
 	Standalone<StringRef> encryptBlobGranuleChunk(const uint8_t* plaintext, const int plaintextLen);
-
-	Standalone<StringRef> generateBlobFileEncryptionHeader(const uint8_t* ciphertext, const int ciphertextLen);
 
 private:
 	EVP_CIPHER_CTX* ctx;

@@ -530,36 +530,6 @@ Standalone<StringRef> EncryptBlobCipherAes265Ctr::encryptBlobGranuleChunk(const 
 	return encrypted;
 }
 
-Standalone<StringRef> EncryptBlobCipherAes265Ctr::generateBlobFileEncryptionHeader(const uint8_t* ciphertext,
-                                                                                   const int ciphertextLen) {
-	// Ensure 'MultiToken' authentication mode
-	ASSERT(authTokenMode == ENCRYPT_HEADER_AUTH_TOKEN_MODE_SINGLE);
-
-	Arena arena;
-	BlobCipherEncryptHeader header;
-
-	memset(reinterpret_cast<uint8_t*>(&header), 0, sizeof(BlobCipherEncryptHeader));
-
-	// Populate encryption header flags details
-	header.flags.size = sizeof(BlobCipherEncryptHeader);
-	header.flags.headerVersion = EncryptBlobCipherAes265Ctr::ENCRYPT_HEADER_VERSION;
-	header.flags.encryptMode = ENCRYPT_CIPHER_MODE_AES_256_CTR;
-	header.flags.authTokenMode = authTokenMode;
-
-	// Populate cipherText encryption-key details
-	header.cipherTextDetails.baseCipherId = textCipherKey->getBaseCipherId();
-	header.cipherTextDetails.encryptDomainId = textCipherKey->getDomainId();
-	header.cipherTextDetails.salt = textCipherKey->getSalt();
-	memcpy(&header.iv[0], &iv[0], AES_256_IV_LENGTH);
-
-	// Populate header encryption-key details
-	header.cipherHeaderDetails.encryptDomainId = headerCipherKey->getDomainId();
-	header.cipherHeaderDetails.baseCipherId = headerCipherKey->getBaseCipherId();
-	header.cipherHeaderDetails.salt = headerCipherKey->getSalt();
-
-	return BlobCipherEncryptHeader::toStringRef(header);
-}
-
 EncryptBlobCipherAes265Ctr::~EncryptBlobCipherAes265Ctr() {
 	if (ctx != nullptr) {
 		EVP_CIPHER_CTX_free(ctx);
