@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <tuple>
+#include <utility>
 #include <variant>
 
 #include "fdbclient/Atomic.h"
@@ -1258,6 +1259,99 @@ ACTOR Future<Void> applyMetadataToCommittedTransactions(CommitBatchContext* self
 
 	return Void();
 }
+
+namespace {
+struct MutationRefDetails {
+	EncryptCipherDomainId domId;
+	MutationRef m;
+
+	MutationRefDetails(const EncryptCipherDomainId id, const MutationRef mRef) : domId(id), m(mRef) {}
+};
+
+using SplitMutationRefVar = std::variant<MutationRefDetails, VectorRef<MutationRefDetails>>;
+
+SplitMutationRefVar splitClearRangeMutationRef(CommitBatchContext* self, const MutationRef mutation, Arena& arena) {
+	KeyRef start = mutation.param1.substr(0, TENANT_PREFIX_SIZE);
+	KeyRef end = mutation.param2.substr(0, TENANT_PREFIX_SIZE);
+	auto itr = self->pProxyCommitData->tenantMap.lower_bound(start);
+
+	if (itr == self->pProxyCommitData->tenantMap.end()) {
+		return SplitMutationRefVar{ MutationRefDetails(FDB_DEFAULT_ENCRYPT_DOMAIN_ID, mutation) };
+	}
+
+	VectorRef<MutationRefDetails> mutationVec;
+	KeyRef curTenantRangeStart;
+	EncryptCipherDomainId curDomainId;
+
+	while (start != end) {
+		curTenantRangeStart = itr->second.prefix;
+		curDomainId = TenantMapEntry::prefixToId(curTenantRangeStart);
+		KeyRef curTenantRangeEnd = TenantMapEntry::idToPrefix(curDomainId + 1);
+
+		// Use 'default encryption domain' for KeyRange starting before the first available Tenant KeyRange
+		if (start < curTenantRangeStart) {
+			MutationRef m = mutation;
+			m.param1 = start;
+			m.param2 = curTenantRangeStart;
+			mutationVec.emplace_back_deep(arena, MutationRefDetails(FDB_DEFAULT_ENCRYPT_DOMAIN_ID, m));
+			start = curTenantRangeStart;
+		} else {
+			MutationRef m = mutation;
+			m.param1 = start;
+			if (end < curTenantRangeEnd) {
+				// Append the last KeyRange to the result set.
+				m.param2 = end;
+				mutationVec.emplace_back_deep(arena, MutationRefDetails(curDomainId, m));
+				start = end;
+				break;
+			} else {
+				// Split input KeyRange across current Tenant boundary
+				m.param2 = curTenantRangeEnd;
+				start = curTenantRangeEnd;
+			}
+			mutationVec.emplace_back_deep(arena, MutationRefDetails(curDomainId, m));
+		}
+
+		ASSERT(end > curTenantRangeEnd);
+
+		itr++;
+		if (itr == self->pProxyCommitData->tenantMap.end()) {
+			// Input mutation KeyRange goes past available Tenants
+			MutationRef m = mutation;
+			m.param1 = start;
+			m.param2 = end;
+			mutationVec.emplace_back(arena, MutationRefDetails(FDB_DEFAULT_ENCRYPT_DOMAIN_ID, m));
+			start = end;
+			break;
+		}
+
+		KeyRef nextTenantRangeStart = itr->second.prefix;
+		EncryptCipherDomainId nextDomId = TenantMapEntry::prefixToId(nextTenantRangeStart);
+		// Use 'default encryption domain' to encrypt 'holes' between available Tenant KeyRanges
+		if ((curDomainId + 1) != nextDomId) {
+			MutationRef m = mutation;
+			m.param1 = start;
+			if (end < nextTenantRangeStart) {
+				// Reached end of the input mutation KeyRange
+				m.param2 = end;
+				mutationVec.emplace_back_deep(arena, MutationRefDetails(FDB_DEFAULT_ENCRYPT_DOMAIN_ID, m));
+				start = end;
+				break;
+			} else {
+				m.param2 = nextTenantRangeStart;
+				start = nextTenantRangeStart;
+			}
+			mutationVec.emplace_back_deep(arena, MutationRefDetails(FDB_DEFAULT_ENCRYPT_DOMAIN_ID, m));
+		}
+	}
+
+	ASSERT_GE(mutationVec.size(), 1);
+	ASSERT_EQ(start, end);
+
+	return SplitMutationRefVar{ mutationVec };
+}
+
+} // namespace
 
 ACTOR Future<WriteMutationRefVar> writeMutationEncryptedMutation(CommitBatchContext* self,
                                                                  int64_t tenantId,
