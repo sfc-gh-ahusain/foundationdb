@@ -108,6 +108,10 @@ Reference<IRandom> debugRandom() {
 	return seededDebugRandom;
 }
 
+Reference<IRandom> deterministicSeededRandom(size_t seed) {
+	return Reference<IRandom>(new DeterministicRandom(seed, true));
+}
+
 Reference<IRandom> deterministicRandom() {
 	if (!seededRandom) {
 		seededRandom = Reference<IRandom>(new DeterministicRandom(platform::getRandomSeed(), true));

@@ -20,10 +20,14 @@
 
 #ifndef FLOW_MULTIINTERFACE_H
 #define FLOW_MULTIINTERFACE_H
+#include "flow/Arena.h"
+#include "flow/IRandom.h"
+#include <algorithm>
 #pragma once
 
 #include "flow/FastRef.h"
 #include "fdbrpc/Locality.h"
+#include "flow/Knobs.h"
 
 #include <vector>
 
@@ -196,18 +200,34 @@ template <class T>
 class MultiInterface<ReferencedInterface<T>> : public ReferenceCounted<MultiInterface<ReferencedInterface<T>>> {
 public:
 	MultiInterface(const std::vector<Reference<ReferencedInterface<T>>>& v) : alternatives(v), bestCount(0) {
-		deterministicRandom()->randomShuffle(alternatives);
+
+		if (!FLOW_KNOBS->ENABLE_HACKING) {
+			deterministicRandom()->randomShuffle(alternatives);
+		} else {
+			std::vector<UID> uids;
+			for (const auto& alternative : alternatives) {
+				uids.push_back(alternative->interf.id());
+			}
+			size_t seed = boost::hash_value(uids);
+			deterministicSeededRandom(seed)->randomShuffle(alternatives);
+		}
+
 		if (LBLocalityData<T>::Present) {
 			std::stable_sort(alternatives.begin(), alternatives.end(), ReferencedInterface<T>::sort_by_distance);
 		}
 		if (size()) {
-			for (int i = 1; i < alternatives.size(); i++) {
-				if (alternatives[i]->distance > alternatives[0]->distance) {
-					bestCount = i;
-					return;
+			if (FLOW_KNOBS->ENABLE_HACKING) {
+				bestCount = std::min(2, size());
+			} else {
+				for (int i = 1; i < alternatives.size(); i++) {
+					if (alternatives[i]->distance > alternatives[0]->distance) {
+						bestCount = i;
+						return;
+					}
 				}
+
+				bestCount = size();
 			}
-			bestCount = size();
 		}
 	}
 

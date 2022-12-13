@@ -200,6 +200,8 @@ void setThreadLocalDeterministicRandomSeed(uint32_t seed);
 // This generator is only deterministic if given a seed using setThreadLocalDeterministicRandomSeed
 Reference<IRandom> deterministicRandom();
 
+Reference<IRandom> deterministicSeededRandom(size_t seed);
+
 // A random number generator that cannot be manually seeded and may be called in
 // non-deterministic contexts.
 Reference<IRandom> nondeterministicRandom();
