@@ -2243,10 +2243,10 @@ ACTOR Future<Void> monitorConsistencyScan(ClusterControllerData* self) {
 	}
 }
 
-ACTOR Future<Void> startEncryptKeyProxy(ClusterControllerData* self, double waitTime) {
+ACTOR Future<Void> startEncryptKeyProxy(ClusterControllerData* self) {
 	// If master fails at the same time, give it a chance to clear master PID.
 	// Also wait to avoid too many consecutive recruits in a small time window.
-	wait(delay(waitTime));
+	wait(delay(0.0));
 
 	TraceEvent("CCEKP_Start", self->id).log();
 	loop {
@@ -2325,6 +2325,7 @@ ACTOR Future<Void> monitorEncryptKeyProxy(ClusterControllerData* self) {
 		return Void();
 	}
 	state SingletonRecruitThrottler recruitThrottler;
+	state bool isInitialized = false;
 	loop {
 		if (self->db.serverInfo->get().encryptKeyProxy.present() && !self->recruitEncryptKeyProxy.get()) {
 			choose {
@@ -2338,8 +2339,9 @@ ACTOR Future<Void> monitorEncryptKeyProxy(ClusterControllerData* self) {
 				when(wait(self->recruitEncryptKeyProxy.onChange())) {}
 			}
 		} else {
-			wait(startEncryptKeyProxy(self, recruitThrottler.newRecruitment()));
+			wait(startEncryptKeyProxy(self));
 		}
+		isInitialized = true;
 	}
 }
 
