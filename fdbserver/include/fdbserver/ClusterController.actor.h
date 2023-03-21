@@ -1684,8 +1684,8 @@ public:
 	}
 
 	void updateKnownIds(std::map<Optional<Standalone<StringRef>>, int>* id_used) {
-		(*id_used)[masterProcessId]++;
 		(*id_used)[clusterControllerProcessId]++;
+		(*id_used)[masterProcessId]++;
 	}
 
 	RecruitRemoteFromConfigurationReply findRemoteWorkersForConfiguration(

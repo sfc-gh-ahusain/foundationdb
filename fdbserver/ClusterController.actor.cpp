@@ -2325,23 +2325,26 @@ ACTOR Future<Void> monitorEncryptKeyProxy(ClusterControllerData* self) {
 		return Void();
 	}
 	state SingletonRecruitThrottler recruitThrottler;
-	state bool isInitialized = false;
 	loop {
 		if (self->db.serverInfo->get().encryptKeyProxy.present() && !self->recruitEncryptKeyProxy.get()) {
-			choose {
-				when(wait(waitFailureClient(self->db.serverInfo->get().encryptKeyProxy.get().waitFailure,
-				                            SERVER_KNOBS->ENCRYPT_KEY_PROXY_FAILURE_TIME))) {
-					TraceEvent("CCEKP_Died", self->id);
+			state Future<Void> wfClient =
+			    waitFailureClient(self->db.serverInfo->get().encryptKeyProxy.get().waitFailure,
+			                      SERVER_KNOBS->ENCRYPT_KEY_PROXY_FAILURE_TIME);
+			loop choose {
+				when(wait(wfClient)) {
 					const auto& encryptKeyProxy = self->db.serverInfo->get().encryptKeyProxy;
 					EncryptKeyProxySingleton(encryptKeyProxy).halt(*self, encryptKeyProxy.get().locality.processId());
 					self->db.clearInterf(ProcessClass::EncryptKeyProxyClass);
+					TraceEvent("CCEKP_Died", self->id);
+					break;
 				}
-				when(wait(self->recruitEncryptKeyProxy.onChange())) {}
+				when(wait(self->recruitEncryptKeyProxy.onChange())) {
+					break;
+				}
 			}
 		} else {
 			wait(startEncryptKeyProxy(self));
 		}
-		isInitialized = true;
 	}
 }
 
