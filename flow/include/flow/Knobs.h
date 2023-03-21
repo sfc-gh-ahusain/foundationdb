@@ -386,6 +386,7 @@ public:
 	int RESTCLIENT_REQUEST_TRIES;
 	int RESTCLIENT_REQUEST_TIMEOUT_SEC;
 	int REST_LOG_LEVEL;
+	bool REST_ENABLE_CONNECTION_POOLING;
 
 	FlowKnobs(class Randomize, class IsSimulated);
 	void initialize(class Randomize, class IsSimulated);

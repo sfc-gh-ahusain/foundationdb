@@ -21,6 +21,7 @@
 #include "fdbclient/RESTUtils.h"
 #include "fdbclient/Knobs.h"
 
+#include "flow/Knobs.h"
 #include "flow/flat_buffers.h"
 #include "flow/UnitTest.h"
 #include "flow/IConnection.h"
@@ -174,7 +175,7 @@ void RESTConnectionPool::returnConnection(RESTConnectionPoolKey connectKey,
 
 	auto poolItr = connectionPoolMap.find(connectKey);
 	// If it expires in the future then add it to the pool in the front iff connection pool size is not maxed
-	if (rconn.expirationTime > now()) {
+	if (FLOW_KNOBS->REST_ENABLE_CONNECTION_POOLING) {
 		bool returned = true;
 		if (poolItr == connectionPoolMap.end()) {
 			connectionPoolMap.insert({ connectKey, std::queue<RESTConnectionPool::ReusableConnection>({ rconn }) });
