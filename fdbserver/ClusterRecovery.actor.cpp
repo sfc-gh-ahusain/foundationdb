@@ -29,11 +29,12 @@
 #include "fdbserver/WaitFailure.h"
 
 #include "flow/ProtocolVersion.h"
+#include "flow/Trace.h"
 #include "flow/actorcompiler.h" // This must be the last #include.
 
 namespace {
 EncryptionAtRestMode getEncryptionAtRest(DatabaseConfiguration config) {
-	TraceEvent(SevDebug, "CREncryptionAtRestMode").detail("Mode", config.encryptionAtRestMode.toString());
+	TraceEvent("ClusterRecoveryGetEaRMode").detail("Mode", config.encryptionAtRestMode.toString());
 	return config.encryptionAtRestMode;
 }
 } // namespace
@@ -937,6 +938,7 @@ ACTOR Future<std::vector<Standalone<CommitTransactionRef>>> recruitEverything(
     Reference<ClusterRecoveryData> self,
     std::vector<StorageServerInterface>* seedServers,
     Reference<ILogSystem> oldLogSystem) {
+	TraceEvent("ClusterRecoveryRecruitEverthing", self->dbgid).detail("Config", self->configuration.toString());
 	if (!self->configuration.isValid()) {
 		RecoveryStatus::RecoveryStatus status;
 		if (self->configuration.initialized) {
@@ -1487,6 +1489,7 @@ ACTOR Future<Void> clusterRecoveryCore(Reference<ClusterRecoveryData> self) {
 	// Unless the cluster database is 'empty', the cluster's EncryptionAtRest status is readable once cstate is
 	// recovered
 	if (!self->cstate.myDBState.tLogs.empty() && self->controllerData->encryptionAtRestMode.canBeSet()) {
+		TraceEvent("ClusterRecoveryEaRState", self->dbgid).detail("State", self->cstate.myDBState.encryptionAtRestMode);
 		self->controllerData->encryptionAtRestMode.send(self->cstate.myDBState.encryptionAtRestMode);
 	}
 

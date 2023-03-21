@@ -228,6 +228,7 @@ bool DatabaseConfiguration::isValid() const {
 	      storageMigrationType != StorageMigrationType::UNSET && tenantMode >= TenantMode::DISABLED &&
 	      tenantMode < TenantMode::END && encryptionAtRestMode >= EncryptionAtRestMode::DISABLED &&
 	      encryptionAtRestMode < EncryptionAtRestMode::END)) {
+		TraceEvent("ConfigIsValid1").detail("Config,", this->toString());
 		return false;
 	}
 	std::set<Key> dcIds;
@@ -238,6 +239,13 @@ bool DatabaseConfiguration::isValid() const {
 		      (r.satelliteTLogReplicationFactor == 0 || (r.satelliteTLogPolicy && r.satellites.size())) &&
 		      (r.satelliteTLogUsableDcsFallback == 0 ||
 		       (r.satelliteTLogReplicationFactor > 0 && r.satelliteTLogReplicationFactorFallback > 0)))) {
+			TraceEvent("ConfigIsValid2")
+			    .detail("DC", dcIds.size())
+			    .detail("DcId", r.dcId)
+			    .detail("replFactor", r.satelliteTLogReplicationFactor)
+			    .detail("TlogWriteAnitiQ", r.satelliteTLogWriteAntiQuorum)
+			    .detail("TLogUsableDcsFallback", r.satelliteTLogPolicyFallback->name())
+			    .detail("Size", r.satellites.size());
 			return false;
 		}
 		dcIds.insert(r.dcId);
@@ -246,6 +254,7 @@ bool DatabaseConfiguration::isValid() const {
 		satelliteDcIds.insert(r.dcId);
 		for (auto& s : r.satellites) {
 			if (satelliteDcIds.count(s.dcId)) {
+				TraceEvent("ConfigIsValid3").detail("Size", satelliteDcIds.size()).detail("SDCID", s.dcId);
 				return false;
 			}
 			satelliteDcIds.insert(s.dcId);
