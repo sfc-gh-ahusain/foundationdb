@@ -1073,10 +1073,16 @@ ACTOR Future<Void> procureValidationTokensFromFiles(Reference<RESTKmsConnectorCt
 		}
 
 		// Populate validation token details
+		if (FLOW_KNOBS->REST_REMOVE_NEWLINE_VALIDATION_TOKENS) {
+			tokenName.erase(std::remove(tokenName.begin(), tokenName.end(), '\n'), tokenName.end());
+		}
 		ValidationTokenCtx tokenCtx =
 		    ValidationTokenCtx(tokenName, ValidationTokenSource::VALIDATION_TOKEN_SOURCE_FILE);
 		tokenCtx.value.resize(fSize);
 		memcpy(tokenCtx.value.data(), buff.begin(), fSize);
+		if (FLOW_KNOBS->REST_REMOVE_NEWLINE_VALIDATION_TOKENS) {
+			tokenCtx.value.erase(std::remove(tokenCtx.value.begin(), tokenCtx.value.end(), '\n'), tokenCtx.value.end());
+		}
 		tokenCtx.filePath = tokenFile;
 
 		// NOTE: avoid logging token-value to prevent token leaks in log files..
