@@ -147,7 +147,9 @@ Future<std::unordered_map<EncryptCipherDomainId, Reference<BlobCipherKey>>> getL
 			break;
 		}
 		// In case encryptKeyProxy has changed, retry the request.
-		when(wait(onEncryptKeyProxyChange(db))) {}
+		when(wait(onEncryptKeyProxyChange(db))) {
+			TraceEvent("GetLatestEncryptCipherKeysDbChange");
+		}
 	}
 	double elapsed = now() - startTime;
 	BlobCipherMetrics::getInstance()->getLatestCipherKeysLatency.addMeasurement(elapsed);
@@ -280,7 +282,9 @@ Future<std::unordered_map<BlobCipherDetails, Reference<BlobCipherKey>>> getEncry
 			break;
 		}
 		// In case encryptKeyProxy has changed, retry the request.
-		when(wait(onEncryptKeyProxyChange(db))) {}
+		when(wait(onEncryptKeyProxyChange(db))) {
+			TraceEvent("GetEncryptCipherKeysDbChange");
+		}
 	}
 	double elapsed = now() - startTime;
 	BlobCipherMetrics::getInstance()->getCipherKeysLatency.addMeasurement(elapsed);
