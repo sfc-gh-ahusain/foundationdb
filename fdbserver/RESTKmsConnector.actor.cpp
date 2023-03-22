@@ -1074,14 +1074,18 @@ ACTOR Future<Void> procureValidationTokensFromFiles(Reference<RESTKmsConnectorCt
 
 		// Populate validation token details
 		if (FLOW_KNOBS->REST_REMOVE_NEWLINE_VALIDATION_TOKENS) {
+			TraceEvent("Before").detail("Str", tokenName);
 			tokenName.erase(std::remove(tokenName.begin(), tokenName.end(), '\n'), tokenName.end());
+			TraceEvent("After").detail("Str", tokenName);
 		}
 		ValidationTokenCtx tokenCtx =
 		    ValidationTokenCtx(tokenName, ValidationTokenSource::VALIDATION_TOKEN_SOURCE_FILE);
 		tokenCtx.value.resize(fSize);
 		memcpy(tokenCtx.value.data(), buff.begin(), fSize);
 		if (FLOW_KNOBS->REST_REMOVE_NEWLINE_VALIDATION_TOKENS) {
+			TraceEvent("BeforeV").detail("Str", tokenCtx.value);
 			tokenCtx.value.erase(std::remove(tokenCtx.value.begin(), tokenCtx.value.end(), '\n'), tokenCtx.value.end());
+			TraceEvent("AfterV").detail("Str", tokenCtx.value);
 		}
 		tokenCtx.filePath = tokenFile;
 
@@ -1245,6 +1249,9 @@ ACTOR Future<Void> testValidationFileTokenPayloadTooLarge(Reference<RESTKmsConne
 }
 
 ACTOR Future<Void> testMultiValidationFileTokenFiles(Reference<RESTKmsConnectorCtx> ctx) {
+	auto& g_knobs = IKnobCollection::getMutableGlobalKnobCollection();
+	g_knobs.setKnob("rest_remove_newline_validation_tokens", KnobValueRef::create(bool{ false }));
+
 	state int numFiles = deterministicRandom()->randomInt(2, 5);
 	state int tokenLen = deterministicRandom()->randomInt(26, 75);
 	state Standalone<StringRef> buff = makeString(tokenLen);
