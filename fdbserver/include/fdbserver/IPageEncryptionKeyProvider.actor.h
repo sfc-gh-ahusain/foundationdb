@@ -334,20 +334,27 @@ public:
 	}
 
 	ACTOR static Future<EncryptionKey> getEncryptionKey(AESEncryptionKeyProvider* self, const void* encodingHeader) {
-		state TextAndHeaderCipherKeys cipherKeys;
-		if (CLIENT_KNOBS->ENABLE_CONFIGURABLE_ENCRYPTION) {
-			BlobCipherEncryptHeaderRef headerRef = Encoder::getEncryptionHeaderRef(encodingHeader);
-			TextAndHeaderCipherKeys cks =
-			    wait(getEncryptCipherKeys(self->db, headerRef, BlobCipherMetrics::KV_REDWOOD));
-			cipherKeys = cks;
-		} else {
-			const BlobCipherEncryptHeader& header = reinterpret_cast<const EncodingHeader*>(encodingHeader)->encryption;
-			TextAndHeaderCipherKeys cks = wait(getEncryptCipherKeys(self->db, header, BlobCipherMetrics::KV_REDWOOD));
-			cipherKeys = cks;
+		try {
+			state TextAndHeaderCipherKeys cipherKeys;
+			if (CLIENT_KNOBS->ENABLE_CONFIGURABLE_ENCRYPTION) {
+				BlobCipherEncryptHeaderRef headerRef = Encoder::getEncryptionHeaderRef(encodingHeader);
+				TextAndHeaderCipherKeys cks =
+				    wait(getEncryptCipherKeys(self->db, headerRef, BlobCipherMetrics::KV_REDWOOD));
+				cipherKeys = cks;
+			} else {
+				const BlobCipherEncryptHeader& header =
+				    reinterpret_cast<const EncodingHeader*>(encodingHeader)->encryption;
+				TextAndHeaderCipherKeys cks =
+				    wait(getEncryptCipherKeys(self->db, header, BlobCipherMetrics::KV_REDWOOD));
+				cipherKeys = cks;
+			}
+			EncryptionKey encryptionKey;
+			encryptionKey.aesKey = cipherKeys;
+			return encryptionKey;
+		} catch (Error& e) {
+			TraceEvent("SSGetEK").error(e);
+			throw;
 		}
-		EncryptionKey encryptionKey;
-		encryptionKey.aesKey = cipherKeys;
-		return encryptionKey;
 	}
 
 	Future<EncryptionKey> getEncryptionKey(const void* encodingHeader) override {
@@ -360,11 +367,16 @@ public:
 
 	ACTOR static Future<EncryptionKey> getLatestEncryptionKey(AESEncryptionKeyProvider* self, int64_t domainId) {
 		ASSERT(self->encryptionMode == EncryptionAtRestMode::DOMAIN_AWARE || domainId < 0);
-		TextAndHeaderCipherKeys cipherKeys =
-		    wait(getLatestEncryptCipherKeysForDomain(self->db, domainId, BlobCipherMetrics::KV_REDWOOD));
-		EncryptionKey encryptionKey;
-		encryptionKey.aesKey = cipherKeys;
-		return encryptionKey;
+		try {
+			TextAndHeaderCipherKeys cipherKeys =
+			    wait(getLatestEncryptCipherKeysForDomain(self->db, domainId, BlobCipherMetrics::KV_REDWOOD));
+			EncryptionKey encryptionKey;
+			encryptionKey.aesKey = cipherKeys;
+			return encryptionKey;
+		} catch (Error& e) {
+			TraceEvent("SSLatestEK").error(e);
+			throw;
+		}
 	}
 
 	Future<EncryptionKey> getLatestEncryptionKey(int64_t domainId) override {

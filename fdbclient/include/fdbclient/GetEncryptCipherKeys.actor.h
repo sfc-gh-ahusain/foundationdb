@@ -98,6 +98,8 @@ Future<std::unordered_map<EncryptCipherDomainId, Reference<BlobCipherKey>>> getL
     Reference<AsyncVar<T> const> db,
     std::unordered_set<EncryptCipherDomainId> domainIds,
     BlobCipherMetrics::UsageType usageType) {
+	// FIXME: Remove this
+	wait(delay(1.0));
 	state Reference<BlobCipherKeyCache> cipherKeyCache = BlobCipherKeyCache::getInstance();
 	state std::unordered_map<EncryptCipherDomainId, Reference<BlobCipherKey>> cipherKeys;
 	state EKPGetLatestBaseCipherKeysRequest request;
@@ -221,6 +223,9 @@ Future<std::unordered_map<BlobCipherDetails, Reference<BlobCipherKey>>> getEncry
     Reference<AsyncVar<T> const> db,
     std::unordered_set<BlobCipherDetails> cipherDetails,
     BlobCipherMetrics::UsageType usageType) {
+	// FIXME: Remove this
+	wait(delay(1.0));
+
 	state Reference<BlobCipherKeyCache> cipherKeyCache = BlobCipherKeyCache::getInstance();
 	state std::unordered_map<BlobCipherDetails, Reference<BlobCipherKey>> cipherKeys;
 	state std::unordered_set<BaseCipherIndex, boost::hash<BaseCipherIndex>> uncachedBaseCipherIds;

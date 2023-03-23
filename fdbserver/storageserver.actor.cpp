@@ -11751,12 +11751,16 @@ ACTOR Future<Void> storageServer(IKeyValueStore* persistentData,
 	self.folder = folder;
 
 	try {
+		TraceEvent("SSBeforeInit");
 		wait(self.storage.init());
+		TraceEvent("SSBeforeCommit");
 		wait(self.storage.commit());
 		++self.counters.kvCommits;
 
+		TraceEvent("SSBeforeEarMode");
 		EncryptionAtRestMode encryptionMode = wait(self.storage.encryptionMode());
 		self.encryptionMode = encryptionMode;
+		TraceEvent("SSAfterEarMode").detail("Mode", self.encryptionMode.get().toString());
 
 		if (seedTag == invalidTag) {
 			ssi.startAcceptingRequests();
@@ -11777,9 +11781,11 @@ ACTOR Future<Void> storageServer(IKeyValueStore* persistentData,
 			self.tag = seedTag;
 		}
 
+		TraceEvent("SSBeforeDurable").detail("Mode", self.encryptionMode.get().toString());
 		self.storage.makeNewStorageServerDurable(self.shardAware);
 		wait(self.storage.commit());
 		++self.counters.kvCommits;
+		TraceEvent("SSAfterDurable").detail("Mode", self.encryptionMode.get().toString());
 
 		self.interfaceRegistered =
 		    storageInterfaceRegistration(&self, ssi, self.registerInterfaceAcceptingRequests.getFuture());
