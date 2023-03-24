@@ -2081,6 +2081,7 @@ public:
 	}
 
 	ACTOR static Future<Void> recover(DWALPager* self) {
+		TraceEvent("DWALRecover");
 		ASSERT(!self->recoverFuture.isValid());
 
 		state bool exists = false;
@@ -2093,7 +2094,9 @@ public:
 			if (!exists) {
 				flags |= IAsyncFile::OPEN_ATOMIC_WRITE_AND_CREATE | IAsyncFile::OPEN_CREATE;
 			}
+			TraceEvent("DWALRecoverBeforeOpen").detail("FileName", self->filename);
 			wait(store(self->pageFile, IAsyncFileSystem::filesystem()->open(self->filename, flags, 0644)));
+			TraceEvent("DWALRecoverAfterOpen").detail("FileName", self->filename);
 		}
 
 		// Header page is always treated as having a page size of smallestPhysicalBlock
@@ -2101,7 +2104,9 @@ public:
 
 		state int64_t fileSize = 0;
 		if (exists) {
+			TraceEvent("DWALRecoverBeforeFileSizeUpdate").detail("FileName", self->filename).detail("Size", fileSize);
 			wait(store(fileSize, self->pageFile->size()));
+			TraceEvent("DWALRecoverAfterFileSizeUpdate").detail("FileName", self->filename).detail("Size", fileSize);
 		}
 
 		self->fileExtension = Void();
@@ -2124,7 +2129,9 @@ public:
 
 			// Try to read primary header
 			try {
+				TraceEvent("DWALRecoverBeforeReadPrimaryHeader");
 				wait(store(self->headerPage, self->readHeaderPage(primaryHeaderPageID)));
+				TraceEvent("DWALRecoverAfterReadPrimaryHeader");
 			} catch (Error& e) {
 				debug_printf("DWALPager(%s) Primary header read failed with %s\n", self->filename.c_str(), e.what());
 
@@ -2153,7 +2160,9 @@ public:
 			if (!self->headerPage.isValid()) {
 				// Try to read backup header
 				try {
+					TraceEvent("DWALRecoverBeforeReadBackupHeader");
 					wait(store(self->headerPage, self->readHeaderPage(backupHeaderPageID)));
+					TraceEvent("DWALRecoverAfterReadBackupHeader");
 					recoveredBackupHeader = true;
 				} catch (Error& e) {
 					debug_printf("DWALPager(%s) Backup header read failed with %s\n", self->filename.c_str(), e.what());
@@ -5224,7 +5233,9 @@ public:
 	}
 
 	ACTOR static Future<Void> init_impl(VersionedBTree* self) {
+		TraceEvent("VBTBeforePagerInit");
 		wait(self->m_pager->init());
+		TraceEvent("VBTAfterPagerInit");
 		self->m_pBuffer.reset(new MutationBuffer());
 
 		self->m_blockSize = self->m_pager->getLogicalPageSize();
@@ -5233,6 +5244,9 @@ public:
 		debug_printf("Recovered pager to version %" PRId64 ", oldest version is %" PRId64 "\n",
 		             self->getLastCommittedVersion(),
 		             self->m_newOldestVersion);
+		TraceEvent("VBTRecoveredPager")
+		    .detail("Version", self->getLastCommittedVersion())
+		    .detail("OldestVersion", self->m_newOldestVersion);
 
 		// Clear any changes that occurred after the latest committed version
 		if (self->m_pBoundaryVerifier != nullptr) {
@@ -5286,6 +5300,7 @@ public:
 			self->m_header.lazyDeleteQueue = self->m_lazyClearQueue.getState();
 
 			debug_printf("BTree created (but not committed)\n");
+			TraceEvent("VBTreeCreatedNotCommitted");
 		} else {
 			self->m_header = ObjectReader::fromStringRef<BTreeCommitHeader>(btreeHeader, Unversioned());
 
@@ -5331,6 +5346,7 @@ public:
 
 			self->m_lazyClearQueue.recover(self->m_pager, self->m_header.lazyDeleteQueue, "LazyClearQueueRecovered");
 			debug_printf("BTree recovered.\n");
+			TraceEvent("VBTreeRecovered");
 		}
 		self->m_lazyClearActor = 0;
 
