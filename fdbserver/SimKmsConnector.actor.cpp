@@ -244,7 +244,13 @@ ACTOR Future<Void> blobMetadataLookup(KmsConnectorInterface interf, KmsConnBlobM
 ACTOR Future<Void> simconnectorCoreImpl(KmsConnectorInterface interf) {
 	TraceEvent("SimEncryptKmsProxyInit", interf.id()).detail("MaxEncryptKeys", SERVER_KNOBS->SIM_KMS_MAX_KEYS);
 
-	wait(delayJittered(1.0)); // Simulate startup for SimKmsConnector
+	if (BUGGIFY) {
+		// Simulate external KMS transient glitch event
+		wait(delayJittered(deterministicRandom()->randomInt(50, 200)));
+	} else {
+		// Simuate KMS startup conncection establishment network delay
+		wait(delayJittered(deterministicRandom()->randomInt(2, 5)));
+	}
 
 	state Reference<SimKmsConnectorContext> ctx = makeReference<SimKmsConnectorContext>(SERVER_KNOBS->SIM_KMS_MAX_KEYS);
 

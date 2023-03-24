@@ -5046,11 +5046,14 @@ public:
 	Future<EncryptionAtRestMode> encryptionMode() { return m_encryptionMode.getFuture(); }
 
 	ACTOR static Future<Reference<ArenaPage>> makeEmptyRoot(VersionedBTree* self) {
+		TraceEvent("MakeEmptyRootBegin");
 		state Reference<ArenaPage> page = self->m_pager->newPageBuffer();
 		page->init(self->m_encodingType, PageType::BTreeNode, 1);
 		if (page->isEncrypted()) {
+			TraceEvent("MakeEmptyRootBeforeLatest");
 			ArenaPage::EncryptionKey k = wait(self->m_keyProvider->getLatestDefaultEncryptionKey());
 			page->encryptionKey = k;
+			TraceEvent("MakeEmptyRootAfterLatest");
 		}
 
 		BTreePage* btpage = (BTreePage*)page->mutateData();
@@ -8050,12 +8053,17 @@ public:
 	Future<Void> init() override { return m_init; }
 
 	ACTOR Future<Void> init_impl(KeyValueStoreRedwood* self) {
-		TraceEvent(SevInfo, "RedwoodInit").detail("FilePrefix", self->m_filename);
-		wait(self->m_tree->init());
-		TraceEvent(SevInfo, "RedwoodInitComplete")
-		    .detail("Filename", self->m_filename)
-		    .detail("Version", self->m_tree->getLastCommittedVersion());
-		self->m_nextCommitVersion = self->m_tree->getLastCommittedVersion() + 1;
+		try {
+			TraceEvent(SevInfo, "RedwoodInit").detail("FilePrefix", self->m_filename);
+			wait(self->m_tree->init());
+			TraceEvent(SevInfo, "RedwoodInitComplete")
+			    .detail("Filename", self->m_filename)
+			    .detail("Version", self->m_tree->getLastCommittedVersion());
+			self->m_nextCommitVersion = self->m_tree->getLastCommittedVersion() + 1;
+		} catch (Error& e) {
+			TraceEvent("RedwoodInitError").error(e);
+			throw e;
+		}
 		return Void();
 	}
 
