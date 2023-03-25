@@ -824,10 +824,10 @@ ACTOR Future<Void> fetchEncryptionKeysByKeyIds(Reference<RESTKmsConnectorCtx> ct
 		std::function<Standalone<VectorRef<EncryptCipherKeyDetailsRef>>(Reference<RESTKmsConnectorCtx>,
 		                                                                Reference<HTTP::Response>)>
 		    f = &parseEncryptCipherResponse;
-		Standalone<VectorRef<EncryptCipherKeyDetailsRef>> result = wait(kmsRequestImpl(
-		    ctx, SERVER_KNOBS->REST_KMS_CONNECTOR_GET_ENCRYPTION_KEYS_ENDPOINT, requestBodyRef, std::move(f)));
-		reply.cipherKeyDetails = result;
-		reply.arena.dependsOn(result.arena());
+		wait(store(
+		    reply.cipherKeyDetails,
+		    kmsRequestImpl(
+		        ctx, SERVER_KNOBS->REST_KMS_CONNECTOR_GET_ENCRYPTION_KEYS_ENDPOINT, requestBodyRef, std::move(f))));
 		req.reply.send(reply);
 	} catch (Error& e) {
 		TraceEvent("RESTLookupEKsByKeyIdsFailed", ctx->uid).error(e);
@@ -907,10 +907,11 @@ ACTOR Future<Void> fetchEncryptionKeysByDomainIds(Reference<RESTKmsConnectorCtx>
 		                                                                Reference<HTTP::Response>)>
 		    f = &parseEncryptCipherResponse;
 
-		Standalone<VectorRef<EncryptCipherKeyDetailsRef>> result = wait(kmsRequestImpl(
-		    ctx, SERVER_KNOBS->REST_KMS_CONNECTOR_GET_LATEST_ENCRYPTION_KEYS_ENDPOINT, requestBodyRef, std::move(f)));
-		reply.cipherKeyDetails = result;
-		reply.arena.dependsOn(result.arena());
+		wait(store(reply.cipherKeyDetails,
+		           kmsRequestImpl(ctx,
+		                          SERVER_KNOBS->REST_KMS_CONNECTOR_GET_LATEST_ENCRYPTION_KEYS_ENDPOINT,
+		                          requestBodyRef,
+		                          std::move(f))));
 		req.reply.send(reply);
 	} catch (Error& e) {
 		TraceEvent("RESTLookupEKsByDomainIdsFailed", ctx->uid).error(e);
