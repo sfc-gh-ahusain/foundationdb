@@ -43,6 +43,9 @@
 #define MEGA_BYTES (1024 * 1024)
 #define NANO_SECOND (1000 * 1000 * 1000)
 
+#define MIN_BASE_CIPHER_LEN 4
+#define MAX_BASE_CIPHER_LEN (2 * AES_256_IV_LENGTH)
+
 struct WorkloadMetrics {
 	double totalEncryptTimeNS;
 	double totalDecryptTimeNS;
@@ -168,9 +171,9 @@ struct EncryptionOpsWorkload : TestWorkload {
 		throw internal_error();
 	}
 
-	static void generateRandomBaseCipher(const int maxLen, uint8_t* buff, int* retLen) {
+	static void generateRandomBaseCipher(const int minLen, const int maxLen, uint8_t* buff, int* retLen) {
 		memset(buff, 0, maxLen);
-		*retLen = deterministicRandom()->randomInt(maxLen / 2, maxLen);
+		*retLen = deterministicRandom()->randomInt(minLen, maxLen);
 		deterministicRandom()->randomBytes(buff, *retLen);
 	}
 
@@ -179,11 +182,11 @@ struct EncryptionOpsWorkload : TestWorkload {
 
 		TraceEvent("SetupCipherEssentialsStart").detail("MinDomainId", minDomainId).detail("MaxDomainId", maxDomainId);
 
-		uint8_t buff[AES_256_KEY_LENGTH];
+		uint8_t buff[MAX_BASE_CIPHER_LEN];
 		std::vector<Reference<BlobCipherKey>> cipherKeys;
 		int cipherLen = 0;
 		for (EncryptCipherDomainId id = minDomainId; id <= maxDomainId; id++) {
-			generateRandomBaseCipher(AES_256_KEY_LENGTH, &buff[0], &cipherLen);
+			generateRandomBaseCipher(MIN_BASE_CIPHER_LEN, MAX_BASE_CIPHER_LEN, &buff[0], &cipherLen);
 			cipherKeyCache->insertCipherKey(id,
 			                                minBaseCipherId,
 			                                buff,
@@ -191,7 +194,7 @@ struct EncryptionOpsWorkload : TestWorkload {
 			                                std::numeric_limits<int64_t>::max(),
 			                                std::numeric_limits<int64_t>::max());
 
-			ASSERT(cipherLen > 0 && cipherLen <= AES_256_KEY_LENGTH);
+			ASSERT(cipherLen > 0 && cipherLen <= MAX_BASE_CIPHER_LEN);
 
 			cipherKeys = cipherKeyCache->getAllCiphers(id);
 			ASSERT_EQ(cipherKeys.size(), 1);
@@ -199,7 +202,7 @@ struct EncryptionOpsWorkload : TestWorkload {
 
 		// insert the Encrypt Header cipherKey; record cipherDetails as getLatestCipher() may not work with multiple
 		// test clients
-		generateRandomBaseCipher(AES_256_KEY_LENGTH, &buff[0], &cipherLen);
+		generateRandomBaseCipher(MIN_BASE_CIPHER_LEN, MAX_BASE_CIPHER_LEN, &buff[0], &cipherLen);
 		cipherKeyCache->insertCipherKey(ENCRYPT_HEADER_DOMAIN_ID,
 		                                headerBaseCipherId,
 		                                buff,
@@ -241,9 +244,9 @@ struct EncryptionOpsWorkload : TestWorkload {
 		Reference<BlobCipherKey> cipherKey = cipherKeyCache->getLatestCipherKey(encryptDomainId);
 		*nextBaseCipherId = cipherKey->getBaseCipherId() + 1;
 
-		generateRandomBaseCipher(AES_256_KEY_LENGTH, baseCipher, baseCipherLen);
+		generateRandomBaseCipher(MIN_BASE_CIPHER_LEN, MAX_BASE_CIPHER_LEN, baseCipher, baseCipherLen);
 
-		ASSERT(*baseCipherLen > 0 && *baseCipherLen <= AES_256_KEY_LENGTH);
+		ASSERT(*baseCipherLen > 0 && *baseCipherLen <= MAX_BASE_CIPHER_LEN);
 		TraceEvent("UpdateBaseCipher").detail("DomainId", encryptDomainId).detail("BaseCipherId", *nextBaseCipherId);
 	}
 

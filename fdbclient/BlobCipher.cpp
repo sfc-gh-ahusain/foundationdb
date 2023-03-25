@@ -39,7 +39,6 @@
 #include "flow/serialize.h"
 #include "flow/Trace.h"
 #include "flow/UnitTest.h"
-#include "flow/xxhash.h"
 
 #include <chrono>
 #include <cstring>
@@ -57,7 +56,7 @@
 #include <io.h>
 #endif
 
-#define BLOB_CIPHER_DEBUG true
+#define BLOB_CIPHER_DEBUG DEBUG_ENCRYPT_KEY_CIPHER
 
 namespace {
 void validateEncryptHeaderFlagVersion(const int flagsVersion) {
@@ -391,9 +390,8 @@ void BlobCipherKey::initKey(const EncryptCipherDomainId& domainId,
                             const int64_t refreshAt,
                             const int64_t expireAt) {
 	// Set the base encryption key properties
-	baseCipher = std::make_unique<uint8_t[]>(AES_256_KEY_LENGTH);
-	memset(baseCipher.get(), 0, AES_256_KEY_LENGTH);
-	memcpy(baseCipher.get(), baseCiph, std::min<int>(baseCiphLen, AES_256_KEY_LENGTH));
+	baseCipher = std::make_unique<uint8_t[]>(baseCiphLen);
+	memcpy(baseCipher.get(), baseCiph, baseCiphLen);
 	baseCipherLen = baseCiphLen;
 	baseCipherId = baseCiphId;
 	// Set the encryption domain for the base encryption key
@@ -478,7 +476,7 @@ Reference<BlobCipherKey> BlobCipherKeyIdCache::insertBaseCipherKey(const Encrypt
                                                                    const int64_t refreshAt,
                                                                    const int64_t expireAt) {
 	ASSERT_GT(baseCipherId, INVALID_ENCRYPT_CIPHER_KEY_ID);
-	ASSERT_LE(baseCipherLen, AES_256_KEY_LENGTH);
+	ASSERT_GT(baseCipherLen, 0);
 
 	// BaseCipherKeys are immutable, given the routine invocation updates 'latestCipher',
 	// ensure no key-tampering is done
@@ -530,7 +528,7 @@ Reference<BlobCipherKey> BlobCipherKeyIdCache::insertBaseCipherKey(const Encrypt
                                                                    const int64_t expireAt) {
 	ASSERT_NE(baseCipherId, INVALID_ENCRYPT_CIPHER_KEY_ID);
 	ASSERT_NE(salt, INVALID_ENCRYPT_RANDOM_SALT);
-	ASSERT_LE(baseCipherLen, AES_256_KEY_LENGTH);
+	ASSERT_GT(baseCipherLen, 0);
 
 	BlobCipherKeyIdCacheKey cacheKey = getCacheKey(baseCipherId, salt);
 
@@ -1592,8 +1590,8 @@ public:
 	           const EncryptCipherBaseKeyId& kId,
 	           const int64_t rAt,
 	           const int64_t eAt)
-	  : domainId(dId), len(deterministicRandom()->randomInt(AES_256_KEY_LENGTH / 2, AES_256_KEY_LENGTH + 1)),
-	    keyId(kId), key(std::make_unique<uint8_t[]>(len)), refreshAt(rAt), expireAt(eAt) {
+	  : domainId(dId), len(deterministicRandom()->randomInt(4, 128)), keyId(kId), key(std::make_unique<uint8_t[]>(len)),
+	    refreshAt(rAt), expireAt(eAt) {
 		deterministicRandom()->randomBytes(key.get(), len);
 	}
 };
