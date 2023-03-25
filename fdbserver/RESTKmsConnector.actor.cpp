@@ -253,12 +253,16 @@ ACTOR Future<Void> parseDiscoverKmsUrlFile(Reference<RESTKmsConnectorCtx> ctx, s
 	std::string url;
 	while (std::getline(ss, url, DISCOVER_URL_FILE_URL_SEP)) {
 		std::string trimedUrl = boost::trim_copy(url);
+		// Remove the trailing '/'(s)
+		while (!trimedUrl.empty() && trimedUrl.ends_with('/')) {
+			trimedUrl.pop_back();
+		}
 		if (trimedUrl.empty()) {
 			// Empty URL, ignore and continue
 			continue;
 		}
-		TraceEvent("RESTParseDiscoverKmsUrlsAddUrl", ctx->uid).detail("Url", url);
-		ctx->kmsUrlHeap.emplace(std::make_shared<KmsUrlCtx>(url));
+		TraceEvent("RESTParseDiscoverKmsUrlsAddUrl", ctx->uid).detail("OrgUrl", url).detail("TrimUrl", trimedUrl);
+		ctx->kmsUrlHeap.emplace(std::make_shared<KmsUrlCtx>(trimedUrl));
 	}
 
 	return Void();
@@ -1011,7 +1015,7 @@ ACTOR Future<Void> procureValidationTokensFromFiles(Reference<RESTKmsConnectorCt
 	TraceEvent("RESTValidationToken", ctx->uid).detail("DetailsStr", details);
 
 	state std::unordered_map<std::string, std::string> tokenFilePathMap;
-	while (!details.empty()) {
+	loop {
 		StringRef name = detailsRef.eat(TOKEN_NAME_FILE_SEP);
 		if (name.empty()) {
 			break;
@@ -1747,9 +1751,18 @@ ACTOR Future<Void> testParseDiscoverKmsUrlFile(Reference<RESTKmsConnectorCtx> ct
 	ASSERT(fileExists(tmpFile->getFileName()));
 
 	state std::unordered_set<std::string> urls;
-	urls.emplace("https://127.0.0.1/foo");
-	urls.emplace("https://127.0.0.1/foo1");
-	urls.emplace("https://127.0.0.1/foo2");
+	urls.emplace("https://127.0.0.1/foo  ");
+	urls.emplace("  https://127.0.0.1/foo1");
+	urls.emplace("  https://127.0.0.1/foo2  ");
+	urls.emplace("https://127.0.0.1/foo3/");
+	urls.emplace("https://127.0.0.1/foo4///");
+
+	state std::unordered_set<std::string> compareUrls;
+	compareUrls.emplace("https://127.0.0.1/foo");
+	compareUrls.emplace("https://127.0.0.1/foo1");
+	compareUrls.emplace("https://127.0.0.1/foo2");
+	compareUrls.emplace("https://127.0.0.1/foo3");
+	compareUrls.emplace("https://127.0.0.1/foo4");
 
 	std::string content;
 	for (auto& url : urls) {
@@ -1764,7 +1777,7 @@ ACTOR Future<Void> testParseDiscoverKmsUrlFile(Reference<RESTKmsConnectorCtx> ct
 		std::shared_ptr<KmsUrlCtx> urlCtx = ctx->kmsUrlHeap.top();
 		ctx->kmsUrlHeap.pop();
 
-		ASSERT(urls.find(urlCtx->url) != urls.end());
+		ASSERT(compareUrls.find(urlCtx->url) != compareUrls.end());
 		ASSERT_EQ(urlCtx->nFailedResponses, 0);
 		ASSERT_EQ(urlCtx->nRequests, 0);
 		ASSERT_EQ(urlCtx->nResponseParseFailures, 0);
