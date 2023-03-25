@@ -389,18 +389,7 @@ ACTOR Future<Void> getCipherKeysByBaseCipherKeyIds(Reference<EncryptKeyProxyData
 			}
 			keysByIdsReq.debugId = keysByIds.debugId;
 			state double startTime = now();
-			std::function<Future<KmsConnLookupEKsByKeyIdsRep>()> keysByIdsRepF = [&]() {
-				return kmsConnectorInf.ekLookupByIds.getReply(keysByIdsReq);
-			};
-			std::function<void()> retryTrace = [&]() {
-				for (const auto& item : keysByIdsReq.encryptKeyInfos) {
-					TraceEvent(SevDebug, "GetCipherKeysByKeyIdsRetry")
-					    .suppressFor(30)
-					    .detail("DomainId", item.domainId);
-				}
-			};
-			KmsConnLookupEKsByKeyIdsRep keysByIdsRep =
-			    wait(kmsReqWithExponentialBackoff(keysByIdsRepF, retryTrace, "GetCipherKeysByKeyIds"_sr));
+			KmsConnLookupEKsByKeyIdsRep keysByIdsRep = wait(kmsConnectorInf.ekLookupByIds.getReply(keysByIdsReq));
 			ekpProxyData->kmsLookupByIdsReqLatency.addMeasurement(now() - startTime);
 
 			for (const auto& item : keysByIdsRep.cipherKeyDetails) {
@@ -531,16 +520,8 @@ ACTOR Future<Void> getLatestCipherKeys(Reference<EncryptKeyProxyData> ekpProxyDa
 			keysByDomainIdReq.debugId = latestKeysReq.debugId;
 
 			state double startTime = now();
-			std::function<Future<KmsConnLookupEKsByDomainIdsRep>()> keysByDomainIdRepF = [&]() {
-				return kmsConnectorInf.ekLookupByDomainIds.getReply(keysByDomainIdReq);
-			};
-			std::function<void()> retryTrace = [&]() {
-				for (const auto& item : keysByDomainIdReq.encryptDomainIds) {
-					TraceEvent(SevDebug, "GetLatestCipherKeysRetry").suppressFor(30).detail("DomainId", item);
-				}
-			};
 			KmsConnLookupEKsByDomainIdsRep keysByDomainIdRep =
-			    wait(kmsReqWithExponentialBackoff(keysByDomainIdRepF, retryTrace, "GetLatestCipherKeys"_sr));
+			    wait(kmsConnectorInf.ekLookupByDomainIds.getReply(keysByDomainIdReq));
 			ekpProxyData->kmsLookupByDomainIdsReqLatency.addMeasurement(now() - startTime);
 
 			for (auto& item : keysByDomainIdRep.cipherKeyDetails) {
