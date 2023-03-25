@@ -57,8 +57,7 @@
 #include <io.h>
 #endif
 
-#define BLOB_CIPHER_DEBUG false
-#define BLOB_CIPHER_SERIALIZATION_CHECKS false
+#define BLOB_CIPHER_DEBUG true
 
 namespace {
 void validateEncryptHeaderFlagVersion(const int flagsVersion) {
@@ -479,6 +478,7 @@ Reference<BlobCipherKey> BlobCipherKeyIdCache::insertBaseCipherKey(const Encrypt
                                                                    const int64_t refreshAt,
                                                                    const int64_t expireAt) {
 	ASSERT_GT(baseCipherId, INVALID_ENCRYPT_CIPHER_KEY_ID);
+	ASSERT_LE(baseCipherLen, AES_256_KEY_LENGTH);
 
 	// BaseCipherKeys are immutable, given the routine invocation updates 'latestCipher',
 	// ensure no key-tampering is done
@@ -504,6 +504,8 @@ Reference<BlobCipherKey> BlobCipherKeyIdCache::insertBaseCipherKey(const Encrypt
 	TraceEvent(SevInfo, "BlobCipherKeyInsertBaseCipherKeyLatest")
 	    .detail("DomainId", domainId)
 	    .detail("BaseCipherId", baseCipherId)
+	    .detail("BaseCipherLen", baseCipherLen)
+	    .detail("BaseCipherChecksum", XXH3_64bits(baseCipher, baseCipherLen))
 	    .detail("RefreshAt", refreshAt)
 	    .detail("ExpireAt", expireAt);
 
@@ -528,6 +530,7 @@ Reference<BlobCipherKey> BlobCipherKeyIdCache::insertBaseCipherKey(const Encrypt
                                                                    const int64_t expireAt) {
 	ASSERT_NE(baseCipherId, INVALID_ENCRYPT_CIPHER_KEY_ID);
 	ASSERT_NE(salt, INVALID_ENCRYPT_RANDOM_SALT);
+	ASSERT_LE(baseCipherLen, AES_256_KEY_LENGTH);
 
 	BlobCipherKeyIdCacheKey cacheKey = getCacheKey(baseCipherId, salt);
 
@@ -554,6 +557,8 @@ Reference<BlobCipherKey> BlobCipherKeyIdCache::insertBaseCipherKey(const Encrypt
 	TraceEvent(SevInfo, "BlobCipherKeyInsertBaseCipherKey")
 	    .detail("DomainId", domainId)
 	    .detail("BaseCipherId", baseCipherId)
+	    .detail("BaseCipherLen", baseCipherLen)
+	    .detail("BaseCipherChecksum", XXH3_64bits(baseCipher, baseCipherLen))
 	    .detail("Salt", salt)
 	    .detail("RefreshAt", refreshAt)
 	    .detail("ExpireAt", expireAt);

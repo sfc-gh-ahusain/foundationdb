@@ -43,6 +43,7 @@
 #include "flow/flow.h"
 #include "flow/genericactors.actor.h"
 #include "flow/network.h"
+#include "flow/xxhash.h"
 
 #include <boost/functional/hash.hpp>
 #include <boost/mpl/not.hpp>
@@ -288,6 +289,11 @@ public:
 		EncryptBaseCipherDomainIdKeyIdCacheKey cacheKey = getBaseCipherDomainIdKeyIdCacheKey(domainId, baseCipherId);
 		baseCipherDomainIdKeyIdCache[cacheKey] =
 		    EncryptBaseCipherKey(domainId, baseCipherId, baseCipherKey, refreshAtTS, expireAtTS);
+		TraceEvent("InsertIntoBaseCipherIdCache")
+		    .detail("DomId", domainId)
+		    .detail("BaseCipherId", baseCipherId)
+		    .detail("BaseCipherLen", baseCipherKey.size())
+		    .detail("BaseCipherKeyChecksum", XXH3_64bits(baseCipherKey.begin(), baseCipherKey.size()));
 	}
 
 	void insertIntoBlobMetadataCache(const BlobMetadataDomainId domainId,

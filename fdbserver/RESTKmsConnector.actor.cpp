@@ -20,6 +20,7 @@
 
 #include "fdbserver/RESTKmsConnector.h"
 
+#include "fdbclient/BlobCipher.h"
 #include "fdbclient/FDBTypes.h"
 #include "fdbclient/RESTClient.h"
 
@@ -40,6 +41,7 @@
 #include "flow/Platform.h"
 #include "flow/Trace.h"
 #include "flow/UnitTest.h"
+#include "flow/xxhash.h"
 
 #include <limits>
 #include <rapidjson/document.h>
@@ -445,10 +447,14 @@ Standalone<VectorRef<EncryptCipherKeyDetailsRef>> parseEncryptCipherResponse(Ref
 		EncryptCipherBaseKeyId baseCipherId = cipherDetail[BASE_CIPHER_ID_TAG].GetUint64();
 		StringRef cipher = StringRef(cipherKey.get(), cipherKeyLen);
 
+		ASSERT_EQ(cipherKeyLen, AES_256_KEY_LENGTH);
+
 		if (FLOW_KNOBS->REST_LOG_LEVEL >= RESTLogSeverity::DEBUG) {
 			TraceEvent event("RESTParseEncryptCipherResponse", ctx->uid);
 			event.detail("DomainId", domainId);
 			event.detail("BaseCipherId", baseCipherId);
+			event.detail("BaseCipherLen", cipher.size());
+			event.detail("BaseCipherChecksum", XXH3_64bits(cipher.begin(), cipher.size()));
 			if (refreshAfterSec.present()) {
 				event.detail("RefreshAt", refreshAfterSec.get());
 			}
