@@ -61,11 +61,12 @@ struct SimEncryptKeyCtx {
 	EncryptCipherBaseKeyId id;
 	SimEncryptKey key;
 	int keyLen;
-	EncryptCipherBaseCipherChkSum chksum;
 
 	explicit SimEncryptKeyCtx(EncryptCipherBaseKeyId kId, const char* data, const int dataLen)
 	  : id(kId), key(data, dataLen), keyLen(dataLen) {
-		chksum = XXH3_64bits(data, dataLen);
+		if (DEBUG_SIM_KEY_CIPHER) {
+			TraceEvent(SevDebug, "SimKmsKeyCtxInit").detail("BaseCipherId", kId).detail("BaseCipherLen", dataLen);
+		}
 	}
 
 	static int getKeyLen(const EncryptCipherBaseKeyId id) {
@@ -115,13 +116,6 @@ struct SimKmsConnectorContext : NonCopyable, ReferenceCounted<SimKmsConnectorCon
 			}
 			simEncryptKeyStore[i] =
 			    std::make_unique<SimEncryptKeyCtx>(i, reinterpret_cast<const char*>(&key[0]), keyLen);
-
-			if (DEBUG_SIM_KEY_CIPHER) {
-				TraceEvent(SevDebug, "SimKmsKeyInit")
-				    .detail("BaseCipherId", simEncryptKeyStore[i]->id)
-				    .detail("BaseCipherLen", simEncryptKeyStore[i]->keyLen)
-				    .detail("BaseCipherChkSum", simEncryptKeyStore[i]->chksum);
-			}
 		}
 	}
 };
@@ -183,8 +177,7 @@ ACTOR Future<Void> ekLookupByIds(Reference<SimKmsConnectorContext> ctx,
 				    .detail("DomId", item.domainId.get())
 				    .detail("BaseCipherId", item.baseCipherId)
 				    .detail("BaseCipherLen", itr->second->keyLen)
-				    .detail("BaseCipherKeyLen", itr->second->keyLen)
-				    .detail("BaseCipherChkSum", itr->second->chksum);
+				    .detail("BaseCipherKeyLen", itr->second->keyLen);
 			}
 		} else {
 			TraceEvent("SimKmsEKLookupByIdsKeyNotFound")
@@ -242,8 +235,7 @@ ACTOR Future<Void> ekLookupByDomainIds(Reference<SimKmsConnectorContext> ctx,
 				    .detail("DomId", domainId)
 				    .detail("BaseCipherId", itr->second->id)
 				    .detail("BaseCipherLen", itr->second->keyLen)
-				    .detail("BaseCipherKeyLen", itr->second->keyLen)
-				    .detail("BaseCipherChkSum", itr->second->chksum);
+				    .detail("BaseCipherKeyLen", itr->second->keyLen);
 			}
 
 		} else {

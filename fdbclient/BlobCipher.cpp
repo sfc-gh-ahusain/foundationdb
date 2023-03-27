@@ -503,7 +503,6 @@ Reference<BlobCipherKey> BlobCipherKeyIdCache::insertBaseCipherKey(const Encrypt
 	    .detail("DomainId", domainId)
 	    .detail("BaseCipherId", baseCipherId)
 	    .detail("BaseCipherLen", baseCipherLen)
-	    .detail("BaseCipherChecksum", XXH3_64bits(baseCipher, baseCipherLen))
 	    .detail("RefreshAt", refreshAt)
 	    .detail("ExpireAt", expireAt);
 
@@ -556,7 +555,6 @@ Reference<BlobCipherKey> BlobCipherKeyIdCache::insertBaseCipherKey(const Encrypt
 	    .detail("DomainId", domainId)
 	    .detail("BaseCipherId", baseCipherId)
 	    .detail("BaseCipherLen", baseCipherLen)
-	    .detail("BaseCipherChecksum", XXH3_64bits(baseCipher, baseCipherLen))
 	    .detail("Salt", salt)
 	    .detail("RefreshAt", refreshAt)
 	    .detail("ExpireAt", expireAt);

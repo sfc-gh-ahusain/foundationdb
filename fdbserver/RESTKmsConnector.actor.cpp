@@ -452,7 +452,6 @@ Standalone<VectorRef<EncryptCipherKeyDetailsRef>> parseEncryptCipherResponse(Ref
 			event.detail("DomainId", domainId);
 			event.detail("BaseCipherId", baseCipherId);
 			event.detail("BaseCipherLen", cipher.size());
-			event.detail("BaseCipherChecksum", XXH3_64bits(cipher.begin(), cipher.size()));
 			if (refreshAfterSec.present()) {
 				event.detail("RefreshAt", refreshAfterSec.get());
 			}

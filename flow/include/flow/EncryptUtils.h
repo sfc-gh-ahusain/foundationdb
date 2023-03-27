@@ -40,7 +40,6 @@ constexpr const int AUTH_TOKEN_MAX_SIZE = AUTH_TOKEN_HMAC_SHA_SIZE;
 using EncryptCipherDomainId = int64_t;
 using EncryptCipherBaseKeyId = uint64_t;
 using EncryptCipherRandomSalt = uint64_t;
-using EncryptCipherBaseCipherChkSum = XXH64_hash_t;
 
 constexpr const EncryptCipherDomainId INVALID_ENCRYPT_DOMAIN_ID = -1;
 constexpr const EncryptCipherDomainId SYSTEM_KEYSPACE_ENCRYPT_DOMAIN_ID = -2;
