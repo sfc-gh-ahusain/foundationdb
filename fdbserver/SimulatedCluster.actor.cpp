@@ -38,6 +38,7 @@
 #include "fdbclient/ClusterInterface.h"
 #include "fdbserver/Knobs.h"
 #include "fdbserver/CoordinationInterface.h"
+#include "fdbserver/RESTSimKmsVault.h"
 #include "fdbclient/SimpleIni.h"
 #include "fdbrpc/AsyncFileNonDurable.actor.h"
 #include "fdbclient/ManagementAPI.actor.h"
@@ -2759,6 +2760,7 @@ ACTOR void setupAndRun(std::string dataFolder,
 
 	try {
 		// systemActors.push_back( startSystemMonitor(dataFolder) );
+		RestSimKms::initConfig();
 		if (rebooting) {
 			wait(timeoutError(restartSimulatedSystem(&systemActors,
 			                                         dataFolder,
@@ -2773,6 +2775,9 @@ ACTOR void setupAndRun(std::string dataFolder,
 			if (restoring) {
 				startingConfiguration = "usable_regions=1"_sr;
 			}
+			wait(g_simulator->registerSimHTTPServer(RestSimKms::REST_SIM_KMS_HOSTNAME,
+			                                        RestSimKms::REST_SIM_KMS_SERVICE_PORT,
+			                                        makeReference<RestSimKms::VaultRequestHandler>()));
 		} else {
 			g_expect_full_pointermap = 1;
 			setupSimulatedSystem(&systemActors,
@@ -2785,6 +2790,9 @@ ACTOR void setupAndRun(std::string dataFolder,
 			                     protocolVersion,
 			                     &tenantMode);
 			wait(delay(1.0)); // FIXME: WHY!!!  //wait for machines to boot
+			wait(g_simulator->registerSimHTTPServer(RestSimKms::REST_SIM_KMS_HOSTNAME,
+			                                        RestSimKms::REST_SIM_KMS_SERVICE_PORT,
+			                                        makeReference<RestSimKms::VaultRequestHandler>()));
 		}
 
 		// restartSimulatedSystem can adjust some testConfig params related to tenants
@@ -2870,6 +2878,7 @@ ACTOR void setupAndRun(std::string dataFolder,
 	TraceEvent("TracingMissingCodeProbes").log();
 	probe::traceMissedProbes(probe::ExecutionContext::Simulation);
 	TraceEvent("SimulatedSystemDestruct").log();
+	RestSimKms::cleanupConfig();
 	g_simulator->stop();
 	destructed = true;
 	wait(Never());
