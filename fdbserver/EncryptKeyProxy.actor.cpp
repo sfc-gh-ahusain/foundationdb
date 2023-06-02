@@ -374,21 +374,28 @@ getLookupDetails(
 	for (const auto& item : dedupedCipherInfos) {
 		const EncryptBaseCipherDomainIdKeyIdCacheKey cacheKey =
 		    ekpProxyData->getBaseCipherDomainIdKeyIdCacheKey(item.domainId, item.baseCipherId);
-		const auto itr = ekpProxyData->baseCipherDomainIdKeyIdCache.find(cacheKey);
-		if (itr != ekpProxyData->baseCipherDomainIdKeyIdCache.end() && !itr->second.isExpired()) {
-			keyIdsReply.baseCipherDetails.emplace_back(
-			    itr->second.domainId, itr->second.baseCipherId, itr->second.baseCipherKey, itr->second.baseCipherKCV);
-			numHits++;
-
-			if (dbgTrace.present()) {
-				// {encryptId, baseCipherId} forms a unique tuple across encryption domains
-				dbgTrace.get().detail(getEncryptDbgTraceKey(ENCRYPT_DBG_TRACE_CACHED_PREFIX,
-				                                            itr->second.domainId,
-				                                            itr->second.baseCipherId),
-				                      "");
-			}
-		} else {
+		int induceMissRatio = CLIENT_KNOBS->ENCRYPT_CIPHER_CACHE_TEST_MISS_INDUCE_RATIO;
+		if (induceMissRatio > 0 && deterministicRandom()->randomInt(0, 100) < induceMissRatio) {
 			lookupCipherInfoMap.emplace(std::make_pair(item.domainId, item.baseCipherId), item);
+		} else {
+			const auto itr = ekpProxyData->baseCipherDomainIdKeyIdCache.find(cacheKey);
+			if (itr != ekpProxyData->baseCipherDomainIdKeyIdCache.end() && !itr->second.isExpired()) {
+				keyIdsReply.baseCipherDetails.emplace_back(itr->second.domainId,
+				                                           itr->second.baseCipherId,
+				                                           itr->second.baseCipherKey,
+				                                           itr->second.baseCipherKCV);
+				numHits++;
+
+				if (dbgTrace.present()) {
+					// {encryptId, baseCipherId} forms a unique tuple across encryption domains
+					dbgTrace.get().detail(getEncryptDbgTraceKey(ENCRYPT_DBG_TRACE_CACHED_PREFIX,
+					                                            itr->second.domainId,
+					                                            itr->second.baseCipherId),
+					                      "");
+				}
+			} else {
+				lookupCipherInfoMap.emplace(std::make_pair(item.domainId, item.baseCipherId), item);
+			}
 		}
 	}
 
@@ -502,28 +509,34 @@ std::unordered_set<EncryptCipherDomainId> getLookupDetailsLatest(
     std::unordered_set<EncryptCipherDomainId> dedupedDomainIds) {
 	std::unordered_set<EncryptCipherDomainId> lookupCipherDomainIds;
 	for (const auto domainId : dedupedDomainIds) {
-		const auto itr = ekpProxyData->baseCipherDomainIdCache.find(domainId);
-		if (itr != ekpProxyData->baseCipherDomainIdCache.end() && !itr->second.needsRefresh() &&
-		    !itr->second.isExpired()) {
-			latestCipherReply.baseCipherDetails.emplace_back(domainId,
-			                                                 itr->second.baseCipherId,
-			                                                 itr->second.baseCipherKey,
-			                                                 itr->second.baseCipherKCV,
-			                                                 itr->second.refreshAt,
-			                                                 itr->second.expireAt);
-			numHits++;
-
-			if (dbgTrace.present()) {
-				// {encryptDomainId, baseCipherId} forms a unique tuple across encryption domains
-				dbgTrace.get().detail(getEncryptDbgTraceKeyWithTS(ENCRYPT_DBG_TRACE_CACHED_PREFIX,
-				                                                  domainId,
-				                                                  itr->second.baseCipherId,
-				                                                  itr->second.refreshAt,
-				                                                  itr->second.expireAt),
-				                      "");
-			}
-		} else {
+		int induceMissRatio = CLIENT_KNOBS->ENCRYPT_CIPHER_CACHE_TEST_MISS_INDUCE_RATIO;
+		if (induceMissRatio > 0 && deterministicRandom()->randomInt(0, 100) < induceMissRatio) {
 			lookupCipherDomainIds.emplace(domainId);
+		} else {
+
+			const auto itr = ekpProxyData->baseCipherDomainIdCache.find(domainId);
+			if (itr != ekpProxyData->baseCipherDomainIdCache.end() && !itr->second.needsRefresh() &&
+			    !itr->second.isExpired()) {
+				latestCipherReply.baseCipherDetails.emplace_back(domainId,
+				                                                 itr->second.baseCipherId,
+				                                                 itr->second.baseCipherKey,
+				                                                 itr->second.baseCipherKCV,
+				                                                 itr->second.refreshAt,
+				                                                 itr->second.expireAt);
+				numHits++;
+
+				if (dbgTrace.present()) {
+					// {encryptDomainId, baseCipherId} forms a unique tuple across encryption domains
+					dbgTrace.get().detail(getEncryptDbgTraceKeyWithTS(ENCRYPT_DBG_TRACE_CACHED_PREFIX,
+					                                                  domainId,
+					                                                  itr->second.baseCipherId,
+					                                                  itr->second.refreshAt,
+					                                                  itr->second.expireAt),
+					                      "");
+				}
+			} else {
+				lookupCipherDomainIds.emplace(domainId);
+			}
 		}
 	}
 

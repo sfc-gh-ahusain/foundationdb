@@ -117,22 +117,74 @@ void removeTrailingChar(std::string& str, char c) {
 	}
 }
 
+constexpr double LAST_5MIN_PENALTY_WEIGHT = 1.0;
+constexpr double LAST_15MIN_PENALTY_WEIGHT = 0.90;
+constexpr double LAST_30MIN_PENALTY_WEIGHT = 0.50;
+constexpr double LAST_HOUR_PENALTY_WEIGHT = 0.25;
+constexpr double MORE_THAN_HOUR_PENALTY = 0.05;
+
+// Routine to determine penalty for cached KMSUrl based on unresponsive KMS behavior observed in recent past. The
+// routine is desgined to assign a maximum penalty if KMS responses are unacceptable in very recent past, with time the
+// the penalty weight deteorates (matches real world outage OR server overload scenario)
+
+struct KmsUrlPenaltyParams {
+	static double penalty(int64_t timeSinceLastPenalty) {
+		if (timeSinceLastPenalty <= 5) {
+			return LAST_5MIN_PENALTY_WEIGHT;
+		} else if (timeSinceLastPenalty > 5 && timeSinceLastPenalty <= 15) {
+			return LAST_15MIN_PENALTY_WEIGHT;
+		} else if (timeSinceLastPenalty > 15 && timeSinceLastPenalty <= 30) {
+			return LAST_30MIN_PENALTY_WEIGHT;
+		} else if (timeSinceLastPenalty > 30 && timeSinceLastPenalty <= 60) {
+			return LAST_HOUR_PENALTY_WEIGHT;
+		}
+		return MORE_THAN_HOUR_PENALTY;
+	}
+};
+
 } // namespace
 
+template <class Params>
 struct KmsUrlCtx {
+	enum class PenaltyType { TIMEOUT = 1, MALFORMED_RESPONSE = 2 };
+
 	std::string url;
 	uint64_t nRequests;
 	uint64_t nFailedResponses;
 	uint64_t nResponseParseFailures;
+	double unresponsivenessPenalty;
+	int64_t unresponsivenessPenaltyTS;
 
-	KmsUrlCtx() : url(""), nRequests(0), nFailedResponses(0), nResponseParseFailures(0) {}
-	explicit KmsUrlCtx(const std::string& u) : url(u), nRequests(0), nFailedResponses(0), nResponseParseFailures(0) {}
+	KmsUrlCtx()
+	  : url(""), nRequests(0), nFailedResponses(0), nResponseParseFailures(0), unresponsivenessPenalty(0.0),
+	    unresponsivenessPenaltyTS(0) {}
+	explicit KmsUrlCtx(const std::string& u)
+	  : url(u), nRequests(0), nFailedResponses(0), nResponseParseFailures(0), unresponsivenessPenalty(0.0),
+	    unresponsivenessPenaltyTS(0) {}
 
-	bool operator<(const KmsUrlCtx& toCompare) const {
-		if (nFailedResponses != toCompare.nFailedResponses) {
-			return nFailedResponses > toCompare.nFailedResponses;
+	bool operator==(const KmsUrlCtx& toCompare) const { return url.compare(toCompare.url) == 0; }
+
+	void refreshUnresponsivenessPenalty() {
+		if (unresponsivenessPenaltyTS == 0) {
+			return;
 		}
-		return nResponseParseFailures > toCompare.nResponseParseFailures;
+		int64_t timeSinceLastPenalty = now() - unresponsivenessPenaltyTS;
+		unresponsivenessPenalty = Params::penalty(timeSinceLastPenalty);
+	}
+
+	void penalize(const PenaltyType type) {
+		if (type == PenaltyType::TIMEOUT) {
+			nFailedResponses++;
+			unresponsivenessPenaltyTS = now();
+		} else {
+			ASSERT_EQ(type, PenaltyType::MALFORMED_RESPONSE);
+			nResponseParseFailures++;
+		}
+	}
+
+	std::string toString() const {
+		return fmt::format(
+		    "{} {} {} {} {}", url, nRequests, nFailedResponses, nResponseParseFailures, unresponsivenessPenalty);
 	}
 };
 
@@ -155,16 +207,74 @@ private:
 	double readTS; // Approach assists refreshing token based on time of creation
 };
 
-using KmsUrlMinHeap = std::priority_queue<std::shared_ptr<KmsUrlCtx>,
-                                          std::vector<std::shared_ptr<KmsUrlCtx>>,
-                                          std::less<std::vector<std::shared_ptr<KmsUrlCtx>>::value_type>>;
+template <class Params>
+struct KmsUrlStore {
+
+	KmsUrlStore() : lastReshuffleTS(0.0) {}
+
+	void penalize(const KmsUrlCtx<Params>& toPenalize, const typename KmsUrlCtx<Params>::PenaltyType type) {
+		bool found = false;
+		for (KmsUrlCtx<Params>& urlCtx : kmsUrls) {
+			if (urlCtx == toPenalize) {
+				urlCtx.penalize(type);
+				found = true;
+				break;
+			}
+		}
+		ASSERT(found);
+
+		// update the penalties
+		for (auto& url : kmsUrls) {
+			url.refreshUnresponsivenessPenalty();
+		}
+
+		if (FLOW_KNOBS->REST_LOG_LEVEL >= RESTLogSeverity::DEBUG) {
+			std::string details;
+			for (const auto& url : kmsUrls) {
+				details.append(fmt::format("[ {} ], ", url.toString()));
+			}
+			TraceEvent("RESTKmsUrlStoreBeforeSort")
+			    .detail("Details", details)
+			    .detail("Penalize", toPenalize.toString());
+		}
+
+		// Reshuffle the URLs
+		std::sort(kmsUrls.begin(), kmsUrls.end(), [](const KmsUrlCtx<Params>& l, const KmsUrlCtx<Params>& r) {
+			// Sort the available URLs based on following rules:
+			// 1. URL will higher unresponsiveness-penalty are least preferred
+			// 2. Among URLs with same unresponsiveness-penalty weight, URLs with more number of failed-respones are
+			// less preferrred
+			// 3. Lastly, URLs with more malformed response messages are less preferred
+
+			if (l.unresponsivenessPenalty != r.unresponsivenessPenalty) {
+				return l.unresponsivenessPenalty < r.unresponsivenessPenalty;
+			}
+			if (l.nFailedResponses != r.nFailedResponses) {
+				return l.nFailedResponses < r.nFailedResponses;
+			}
+			return l.nResponseParseFailures < r.nResponseParseFailures;
+		});
+		lastReshuffleTS = now();
+
+		if (FLOW_KNOBS->REST_LOG_LEVEL >= RESTLogSeverity::DEBUG) {
+			std::string details;
+			for (const auto& url : kmsUrls) {
+				details.append(fmt::format("[ {} ], ", url.toString()));
+			}
+			TraceEvent("RESTKmsUrlStoreAfterSort").detail("Details", details);
+		}
+	}
+
+	double lastReshuffleTS;
+	std::vector<KmsUrlCtx<Params>> kmsUrls;
+};
 
 FDB_BOOLEAN_PARAM(RefreshPersistedUrls);
 FDB_BOOLEAN_PARAM(IsCipherType);
 
 struct RESTKmsConnectorCtx : public ReferenceCounted<RESTKmsConnectorCtx> {
 	UID uid;
-	KmsUrlMinHeap kmsUrlHeap;
+	KmsUrlStore<KmsUrlPenaltyParams> kmsUrlStore;
 	double lastKmsUrlsRefreshTs;
 	RESTClient restClient;
 	std::unordered_map<std::string, ValidationTokenCtx> validationTokens;
@@ -183,18 +293,19 @@ std::string getFullRequestUrl(Reference<RESTKmsConnectorCtx> ctx, const std::str
 	return (suffix[0] == '/') ? fullUrl.append(suffix) : fullUrl.append("/").append(suffix);
 }
 
-void dropCachedKmsUrls(Reference<RESTKmsConnectorCtx> ctx) {
-	while (!ctx->kmsUrlHeap.empty()) {
-		std::shared_ptr<KmsUrlCtx> curUrl = ctx->kmsUrlHeap.top();
-
-		TraceEvent("RESTDropCachedKmsUrls", ctx->uid)
-		    .detail("Url", curUrl->url)
-		    .detail("NumRequests", curUrl->nRequests)
-		    .detail("NumFailedResponses", curUrl->nFailedResponses)
-		    .detail("NumRespParseFailures", curUrl->nResponseParseFailures);
-
-		ctx->kmsUrlHeap.pop();
+void dropCachedKmsUrls(Reference<RESTKmsConnectorCtx> ctx,
+                       std::unordered_map<std::string, KmsUrlCtx<KmsUrlPenaltyParams>>* urlMap) {
+	for (const auto& url : ctx->kmsUrlStore.kmsUrls) {
+		if (FLOW_KNOBS->REST_LOG_LEVEL >= RESTLogSeverity::VERBOSE) {
+			TraceEvent("RESTDropCachedKmsUrls", ctx->uid)
+			    .detail("Url", url.url)
+			    .detail("NumRequests", url.nRequests)
+			    .detail("NumFailedResponses", url.nFailedResponses)
+			    .detail("NumRespParseFailures", url.nResponseParseFailures);
+		}
+		urlMap->insert(std::make_pair(url.url, url));
 	}
+	ctx->kmsUrlStore.kmsUrls.clear();
 }
 
 bool shouldRefreshKmsUrls(Reference<RESTKmsConnectorCtx> ctx) {
@@ -209,8 +320,9 @@ void extractKmsUrls(Reference<RESTKmsConnectorCtx> ctx,
                     const rapidjson::Document& doc,
                     Reference<HTTP::IncomingResponse> httpResp) {
 	// Refresh KmsUrls cache
-	dropCachedKmsUrls(ctx);
-	ASSERT(ctx->kmsUrlHeap.empty());
+	std::unordered_map<std::string, KmsUrlCtx<KmsUrlPenaltyParams>> urlMap;
+	dropCachedKmsUrls(ctx, &urlMap);
+	ASSERT_EQ(ctx->kmsUrlStore.kmsUrls.size(), 0);
 
 	for (const auto& url : doc[KMS_URLS_TAG].GetArray()) {
 		if (!url.IsString()) {
@@ -223,11 +335,22 @@ void extractKmsUrls(Reference<RESTKmsConnectorCtx> ctx,
 		urlStr.resize(url.GetStringLength());
 		memcpy(urlStr.data(), url.GetString(), url.GetStringLength());
 
-		if (FLOW_KNOBS->REST_LOG_LEVEL >= RESTLogSeverity::INFO) {
-			TraceEvent("RESTExtractDiscoverKmsUrlsAddUrl", ctx->uid).detail("Url", urlStr);
-		}
+		// preserve the KmsUrl stats while (re)discovering KMS URLs, preferable to select the servers with lesser count
+		// of unexpected events in the past
 
-		ctx->kmsUrlHeap.emplace(std::make_shared<KmsUrlCtx>(urlStr));
+		auto itr = urlMap.find(urlStr);
+		if (itr != urlMap.end()) {
+			if (FLOW_KNOBS->REST_LOG_LEVEL >= RESTLogSeverity::INFO) {
+				TraceEvent("RESTDiscoverExistingKmsUrl", ctx->uid).detail("UrlCtx", itr->second.toString());
+			}
+			ctx->kmsUrlStore.kmsUrls.emplace_back(itr->second);
+		} else {
+			auto urlCtx = KmsUrlCtx<KmsUrlPenaltyParams>(urlStr);
+			if (FLOW_KNOBS->REST_LOG_LEVEL >= RESTLogSeverity::INFO) {
+				TraceEvent("RESTDiscoverNewKmsUrl", ctx->uid).detail("UrlCtx", urlCtx.toString());
+			}
+			ctx->kmsUrlStore.kmsUrls.emplace_back(urlCtx);
+		}
 	}
 
 	// Update Kms URLs refresh timestamp
@@ -270,7 +393,7 @@ ACTOR Future<Void> parseDiscoverKmsUrlFile(Reference<RESTKmsConnectorCtx> ctx, s
 			continue;
 		}
 		TraceEvent("RESTParseDiscoverKmsUrlsAddUrl", ctx->uid).detail("OrgUrl", url).detail("TrimUrl", trimedUrl);
-		ctx->kmsUrlHeap.emplace(std::make_shared<KmsUrlCtx>(trimedUrl));
+		ctx->kmsUrlStore.kmsUrls.emplace_back(KmsUrlCtx<KmsUrlPenaltyParams>(trimedUrl));
 	}
 
 	return Void();
@@ -775,24 +898,21 @@ Future<T> kmsRequestImpl(
     std::function<T(Reference<RESTKmsConnectorCtx>, Reference<HTTP::IncomingResponse>)> parseFunc) {
 	state UID requestID = deterministicRandom()->randomUniqueID();
 
-	// Follow 2-phase scheme:
-	// Phase-1: Attempt to do request reaching out to cached KmsUrls in the order of
-	//          past success requests success counts.
-	// Phase-2: For some reason if none of the cached KmsUrls worked, re-discover the KmsUrls and
-	//          repeat phase-1.
+	// Follow multi-phase approach:
+	// Step-1: Enumerate KmsUrlStore cached URLs in the defined order of preference, if URL fails with an acceptable
+	// error (time-out or connection-failed), then continue enumeration. Otherwise, bubble up the error.
+	// Step-2: Refresh KmsUlrStore cached URLs by re-discovering KMS URLs and loop Step-1
+	state int pass = 0;
+	state KmsUrlCtx<KmsUrlPenaltyParams>* urlCtx;
+	loop {
+		state int idx = 0;
+		state int64_t start = now();
 
-	state int pass = 1;
-	for (; pass <= 2; pass++) {
-		state std::stack<std::shared_ptr<KmsUrlCtx>> tempStack;
-
-		// Iterate over Kms URLs
-		while (!ctx->kmsUrlHeap.empty()) {
-			state std::shared_ptr<KmsUrlCtx> curUrl = ctx->kmsUrlHeap.top();
-			ctx->kmsUrlHeap.pop();
-			tempStack.push(curUrl);
-
+		pass++;
+		while (idx < ctx->kmsUrlStore.kmsUrls.size()) {
+			urlCtx = &ctx->kmsUrlStore.kmsUrls[idx++];
 			try {
-				std::string kmsEncryptionFullUrl = getFullRequestUrl(ctx, curUrl->url, urlSuffix);
+				std::string kmsEncryptionFullUrl = getFullRequestUrl(ctx, urlCtx->url, urlSuffix);
 
 				if (FLOW_KNOBS->REST_LOG_LEVEL >= RESTLogSeverity::DEBUG) {
 					TraceEvent("RESTKmsRequestImpl", ctx->uid)
@@ -807,26 +927,20 @@ Future<T> kmsRequestImpl(
 
 				Reference<HTTP::IncomingResponse> resp =
 				    wait(ctx->restClient.doPost(kmsEncryptionFullUrl, requestBodyRef.toString(), headers));
-				curUrl->nRequests++;
+				urlCtx->nRequests++;
 
 				try {
 					T parsedResp = parseFunc(ctx, resp);
-
-					// Push urlCtx back on the ctx->urlHeap
-					while (!tempStack.empty()) {
-						ctx->kmsUrlHeap.emplace(tempStack.top());
-						tempStack.pop();
-					}
-
 					return parsedResp;
 				} catch (Error& e) {
 					TraceEvent(SevWarn, "KmsRequestRespParseFailure").error(e).detail("RequestID", requestID);
-					curUrl->nResponseParseFailures++;
+					ctx->kmsUrlStore.penalize(*urlCtx, KmsUrlCtx<KmsUrlPenaltyParams>::PenaltyType::MALFORMED_RESPONSE);
 					// attempt to do request from next KmsUrl
 				}
 			} catch (Error& e) {
-				curUrl->nFailedResponses++;
-				if (pass > 1 && isKmsNotReachable(e.code())) {
+				ctx->kmsUrlStore.penalize(*urlCtx, KmsUrlCtx<KmsUrlPenaltyParams>::PenaltyType::TIMEOUT);
+				// Keep re-trying if KMS request time-out OR is server unreachable; otherwise, bubble up the error
+				if (!isKmsNotReachable(e.code())) {
 					TraceEvent(SevDebug, "KmsRequestFailedUnreachable", ctx->uid)
 					    .error(e)
 					    .detail("RequestID", requestID);
@@ -835,22 +949,16 @@ Future<T> kmsRequestImpl(
 					TraceEvent(SevDebug, "KmsRequestError", ctx->uid).error(e).detail("RequestID", requestID);
 					// attempt to do request from next KmsUrl
 				}
+				// UrlStore might have reshuffled the URLs, if done, enumerate URLs in newer order
+				if (start < ctx->kmsUrlStore.lastReshuffleTS) {
+					idx = 0;
+				}
 			}
 		}
 
-		if (pass == 1) {
-			// Re-discover KMS urls and re-attempt request using newer KMS URLs
-			wait(discoverKmsUrls(ctx, RefreshPersistedUrls::True));
-		}
+		// Re-discover KMS urls and re-attempt request using newer KMS URLs
+		wait(discoverKmsUrls(ctx, RefreshPersistedUrls::True));
 	}
-
-	if (FLOW_KNOBS->REST_LOG_LEVEL >= RESTLogSeverity::VERBOSE) {
-		TraceEvent("RESTKmsRequestFailed", ctx->uid).detail("RequestID", requestID);
-	}
-
-	// Failed to do request from the remote KMS
-	// TODO: generic KMS error types
-	throw encrypt_keys_fetch_failed();
 }
 
 ACTOR Future<Void> fetchEncryptionKeysByKeyIds(Reference<RESTKmsConnectorCtx> ctx, KmsConnLookupEKsByKeyIdsReq req) {
@@ -1505,9 +1613,8 @@ void getFakeBlobMetadataResponse(StringRef jsonReqRef,
 }
 
 void validateKmsUrls(Reference<RESTKmsConnectorCtx> ctx) {
-	ASSERT_EQ(ctx->kmsUrlHeap.size(), 3);
-	std::shared_ptr<KmsUrlCtx> urlCtx = ctx->kmsUrlHeap.top();
-	ASSERT_EQ(urlCtx->url.compare(KMS_URL_NAME_TEST), 0);
+	ASSERT_EQ(ctx->kmsUrlStore.kmsUrls.size(), 3);
+	ASSERT_EQ(ctx->kmsUrlStore.kmsUrls[0].url.compare(KMS_URL_NAME_TEST), 0);
 }
 
 void testGetEncryptKeysByKeyIdsRequestBody(Reference<RESTKmsConnectorCtx> ctx, Arena& arena) {
@@ -1891,15 +1998,12 @@ ACTOR Future<Void> testParseDiscoverKmsUrlFile(Reference<RESTKmsConnectorCtx> ct
 	tmpFile->write((const uint8_t*)content.data(), content.size());
 	wait(parseDiscoverKmsUrlFile(ctx, tmpFile->getFileName()));
 
-	ASSERT_EQ(ctx->kmsUrlHeap.size(), urls.size());
-	while (!ctx->kmsUrlHeap.empty()) {
-		std::shared_ptr<KmsUrlCtx> urlCtx = ctx->kmsUrlHeap.top();
-		ctx->kmsUrlHeap.pop();
-
-		ASSERT(compareUrls.find(urlCtx->url) != compareUrls.end());
-		ASSERT_EQ(urlCtx->nFailedResponses, 0);
-		ASSERT_EQ(urlCtx->nRequests, 0);
-		ASSERT_EQ(urlCtx->nResponseParseFailures, 0);
+	ASSERT_EQ(ctx->kmsUrlStore.kmsUrls.size(), urls.size());
+	for (const auto& url : ctx->kmsUrlStore.kmsUrls) {
+		ASSERT(compareUrls.find(url.url) != compareUrls.end());
+		ASSERT_EQ(url.nFailedResponses, 0);
+		ASSERT_EQ(url.nRequests, 0);
+		ASSERT_EQ(url.nResponseParseFailures, 0);
 	}
 
 	return Void();
@@ -2000,6 +2104,59 @@ TEST_CASE("/KmsConnector/REST/GetEncryptionKeyOps") {
 		testGetEncryptKeysByKeyIdsRequestBody(ctx, arena);
 		testGetEncryptKeysByDomainIdsRequestBody(ctx, arena);
 		testGetBlobMetadataRequestBody(ctx);
+	}
+	return Void();
+}
+
+namespace {
+struct TestUrlPenaltyParam {
+	static double penalty(int64_t ignored) {
+		int elapsed = deterministicRandom()->randomInt(1, 120);
+		return KmsUrlPenaltyParams::penalty(elapsed);
+	}
+};
+} // namespace
+
+TEST_CASE("/KmsConnector/KmsUrlStore") {
+	KmsUrlStore<TestUrlPenaltyParam> store;
+	const int nUrls = deterministicRandom()->randomInt(2, 10);
+	for (int i = 0; i < nUrls; i++) {
+		store.kmsUrls.emplace_back("foo" + std::to_string(i));
+	}
+	ASSERT_EQ(store.kmsUrls.size(), nUrls);
+	for (const auto& url : store.kmsUrls) {
+		ASSERT_EQ(url.unresponsivenessPenalty, 0.0);
+		ASSERT_EQ(url.unresponsivenessPenaltyTS, 0);
+		ASSERT_EQ(url.nFailedResponses, 0);
+		ASSERT_EQ(url.nResponseParseFailures, 0);
+		ASSERT_EQ(url.nRequests, 0);
+	}
+
+	const int nIterations = deterministicRandom()->randomInt(100, 500);
+	for (int i = 0; i < nIterations; i++) {
+		const int idx = deterministicRandom()->randomInt(0, nUrls);
+
+		if (deterministicRandom()->coinflip()) {
+			if (deterministicRandom()->coinflip()) {
+				store.penalize(store.kmsUrls[idx], KmsUrlCtx<TestUrlPenaltyParam>::PenaltyType::TIMEOUT);
+			} else {
+				store.penalize(store.kmsUrls[idx], KmsUrlCtx<TestUrlPenaltyParam>::PenaltyType::MALFORMED_RESPONSE);
+			}
+		} else {
+			// perfect world!
+		}
+
+		for (int j = 0; j < store.kmsUrls.size() - 1; j++) {
+			if (store.kmsUrls[j].unresponsivenessPenalty != store.kmsUrls[j + 1].unresponsivenessPenalty) {
+				ASSERT_LE(store.kmsUrls[j].unresponsivenessPenalty, store.kmsUrls[j + 1].unresponsivenessPenalty);
+			} else {
+				if (store.kmsUrls[j].nFailedResponses != store.kmsUrls[j + 1].nFailedResponses) {
+					ASSERT_LE(store.kmsUrls[j].nFailedResponses, store.kmsUrls[j + 1].nFailedResponses);
+				} else {
+					ASSERT_LE(store.kmsUrls[j].nResponseParseFailures, store.kmsUrls[j + 1].nResponseParseFailures);
+				}
+			}
+		}
 	}
 	return Void();
 }

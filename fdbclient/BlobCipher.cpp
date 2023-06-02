@@ -804,39 +804,49 @@ Reference<BlobCipherKey> BlobCipherKeyCache::insertCipherKey(const EncryptCipher
 }
 
 Reference<BlobCipherKey> BlobCipherKeyCache::getLatestCipherKey(const EncryptCipherDomainId& domainId) {
-	if (domainId == INVALID_ENCRYPT_DOMAIN_ID) {
-		TraceEvent(SevWarn, "BlobCipherGetLatestCipherKeyInvalidID").detail("DomainId", domainId);
-		throw encrypt_invalid_id();
-	}
-	auto domainItr = domainCacheMap.find(domainId);
-	if (domainItr == domainCacheMap.end()) {
-		TraceEvent(SevInfo, "BlobCipherGetLatestCipherKeyDomainNotFound").detail("DomainId", domainId);
+	int induceMissRatio = CLIENT_KNOBS->ENCRYPT_CIPHER_CACHE_TEST_MISS_INDUCE_RATIO;
+	if (induceMissRatio > 0 && deterministicRandom()->randomInt(0, 100) < induceMissRatio) {
 		return Reference<BlobCipherKey>();
+	} else {
+		if (domainId == INVALID_ENCRYPT_DOMAIN_ID) {
+			TraceEvent(SevWarn, "BlobCipherGetLatestCipherKeyInvalidID").detail("DomainId", domainId);
+			throw encrypt_invalid_id();
+		}
+		auto domainItr = domainCacheMap.find(domainId);
+		if (domainItr == domainCacheMap.end()) {
+			TraceEvent(SevInfo, "BlobCipherGetLatestCipherKeyDomainNotFound").detail("DomainId", domainId);
+			return Reference<BlobCipherKey>();
+		}
+
+		Reference<BlobCipherKeyIdCache> keyIdCache = domainItr->second;
+		Reference<BlobCipherKey> cipherKey = keyIdCache->getLatestCipherKey();
+
+		cipherKey.isValid() ? ++BlobCipherMetrics::getInstance()->latestCipherKeyCacheHit
+		                    : ++BlobCipherMetrics::getInstance()->latestCipherKeyCacheMiss;
+		return cipherKey;
 	}
-
-	Reference<BlobCipherKeyIdCache> keyIdCache = domainItr->second;
-	Reference<BlobCipherKey> cipherKey = keyIdCache->getLatestCipherKey();
-
-	cipherKey.isValid() ? ++BlobCipherMetrics::getInstance()->latestCipherKeyCacheHit
-	                    : ++BlobCipherMetrics::getInstance()->latestCipherKeyCacheMiss;
-	return cipherKey;
 }
 
 Reference<BlobCipherKey> BlobCipherKeyCache::getCipherKey(const EncryptCipherDomainId& domainId,
                                                           const EncryptCipherBaseKeyId& baseCipherId,
                                                           const EncryptCipherRandomSalt& salt) {
-	auto domainItr = domainCacheMap.find(domainId);
-	if (domainItr == domainCacheMap.end()) {
+	int induceMissRatio = CLIENT_KNOBS->ENCRYPT_CIPHER_CACHE_TEST_MISS_INDUCE_RATIO;
+	if (induceMissRatio > 0 && deterministicRandom()->randomInt(0, 100) < induceMissRatio) {
 		return Reference<BlobCipherKey>();
+	} else {
+		auto domainItr = domainCacheMap.find(domainId);
+		if (domainItr == domainCacheMap.end()) {
+			return Reference<BlobCipherKey>();
+		}
+
+		Reference<BlobCipherKeyIdCache> keyIdCache = domainItr->second;
+		Reference<BlobCipherKey> cipherKey = keyIdCache->getCipherByBaseCipherId(baseCipherId, salt);
+
+		cipherKey.isValid() ? ++BlobCipherMetrics::getInstance()->cipherKeyCacheHit
+		                    : ++BlobCipherMetrics::getInstance()->cipherKeyCacheMiss;
+
+		return cipherKey;
 	}
-
-	Reference<BlobCipherKeyIdCache> keyIdCache = domainItr->second;
-	Reference<BlobCipherKey> cipherKey = keyIdCache->getCipherByBaseCipherId(baseCipherId, salt);
-
-	cipherKey.isValid() ? ++BlobCipherMetrics::getInstance()->cipherKeyCacheHit
-	                    : ++BlobCipherMetrics::getInstance()->cipherKeyCacheMiss;
-
-	return cipherKey;
 }
 
 void BlobCipherKeyCache::resetEncryptDomainId(const EncryptCipherDomainId domainId) {

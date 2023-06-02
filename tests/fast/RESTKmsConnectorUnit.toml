@@ -8,4 +8,4 @@ startDelay = 0
 
     [[test.workload]]
     testName = 'UnitTests'
-    testsMatching = '/KmsConnector/REST/'
+    testsMatching = '/KmsConnector/'
