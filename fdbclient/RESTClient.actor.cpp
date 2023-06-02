@@ -87,6 +87,10 @@ std::unordered_map<std::string, int> RESTClient::getKnobs() const {
 	return knobs.get();
 }
 
+bool isErrorRetryable(const Error& e) {
+	return e.code() != error_code_timed_out || e.code() != error_code_connection_failed;
+}
+
 ACTOR Future<Reference<HTTP::IncomingResponse>> doRequest_impl(Reference<RESTClient> client,
                                                                std::string verb,
                                                                HTTP::Headers headers,
@@ -172,7 +176,7 @@ ACTOR Future<Reference<HTTP::IncomingResponse>> doRequest_impl(Reference<RESTCli
 
 		// All errors in err are potentially retryable as well as certain HTTP response codes...
 		bool retryable =
-		    err.present() || r->code == HTTP::HTTP_STATUS_CODE_INTERNAL_SERVER_ERROR ||
+		    (err.present() && isErrorRetryable(err.get())) || r->code == HTTP::HTTP_STATUS_CODE_INTERNAL_SERVER_ERROR ||
 		    r->code == HTTP::HTTP_STATUS_CODE_BAD_GATEWAY || r->code == HTTP::HTTP_STATUS_CODE_BAD_GATEWAY ||
 		    r->code == HTTP::HTTP_STATUS_CODE_SERVICE_UNAVAILABLE ||
 		    r->code == HTTP::HTTP_STATUS_CODE_TOO_MANY_REQUESTS || r->code == HTTP::HTTP_STATUS_CODE_TIMEOUT;
