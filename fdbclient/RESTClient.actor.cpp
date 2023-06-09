@@ -88,7 +88,7 @@ std::unordered_map<std::string, int> RESTClient::getKnobs() const {
 }
 
 bool isErrorRetryable(const Error& e) {
-	return e.code() != error_code_timed_out || e.code() != error_code_connection_failed;
+	return e.code() != error_code_timed_out && e.code() != error_code_connection_failed;
 }
 
 ACTOR Future<Reference<HTTP::IncomingResponse>> doRequest_impl(Reference<RESTClient> client,

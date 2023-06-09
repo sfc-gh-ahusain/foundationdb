@@ -1005,17 +1005,17 @@ BaseTraceEvent::State BaseTraceEvent::init() {
 	std::string_view typeSv(type);
 
 	// Backstop to throttle very spammy trace events
-	if (enabled.isSuppressible() && g_network && !g_network->isSimulated() && severity > SevDebug &&
+	/*if (enabled.isSuppressible() && g_network && !g_network->isSimulated() && severity > SevDebug &&
 	    isNetworkThread()) {
-		if (traceEventThrottlerCache->isAboveThreshold(StringRef((uint8_t*)type, strlen(type)))) {
-			enabled.suppress();
-			TraceEvent(SevWarnAlways, std::string(TRACE_EVENT_THROTTLE_STARTING_TYPE).append(type).c_str())
-			    .suppressFor(5);
-		} else {
-			traceEventThrottlerCache->addAndExpire(
-			    StringRef((uint8_t*)type, strlen(type)), 1, now() + FLOW_KNOBS->TRACE_EVENT_THROTTLER_SAMPLE_EXPIRY);
-		}
-	}
+	    if (traceEventThrottlerCache->isAboveThreshold(StringRef((uint8_t*)type, strlen(type)))) {
+	        enabled.suppress();
+	        TraceEvent(SevWarnAlways, std::string(TRACE_EVENT_THROTTLE_STARTING_TYPE).append(type).c_str())
+	            .suppressFor(5);
+	    } else {
+	        traceEventThrottlerCache->addAndExpire(
+	            StringRef((uint8_t*)type, strlen(type)), 1, now() + FLOW_KNOBS->TRACE_EVENT_THROTTLER_SAMPLE_EXPIRY);
+	    }
+	}*/
 
 	if (enabled) {
 		tmpEventMetric = std::make_unique<DynamicEventMetric>(MetricNameRef());
